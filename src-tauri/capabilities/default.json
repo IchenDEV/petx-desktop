@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-capability",
+  "description": "Permissions required by the transparent desktop companion window",
+  "windows": ["main"],
+  "platforms": ["macOS", "windows", "linux"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-outer-position",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-close",
+    "core:window:allow-current-monitor",
+    "core:window:allow-outer-size",
+    "autostart:default"
+  ]
+}

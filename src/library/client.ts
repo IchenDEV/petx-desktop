@@ -1,11 +1,19 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { isTauri } from '../platform';
+import {
+  BUILTIN_PET_MANIFEST_URL,
+  DEFAULT_ACTIVE_PET,
+  parseActivePetReference,
+  parseResolvedActivePet,
+} from './model';
 import type {
   CatalogItem,
   CatalogResponse,
   DirectLibrarySourceId,
   InstalledPet,
+  ResolvedActivePet,
 } from './model';
 
 const PREVIEW_MANIFEST_URL = '/__petdex/manifest';
@@ -13,6 +21,8 @@ const PETSHARE_PREVIEW_MANIFEST_URL = '/__petshare/catalog';
 const PETDEX_ASSET_BASE = 'https://assets.petdex.dev';
 const PETSHARE_ASSET_BASE = 'https://petshare.idevlab.dev';
 const previewRequests = new Map<string, Promise<ResolvedPetPreview>>();
+
+export const ACTIVE_PET_CHANGED_EVENT = 'petx://active-pet-changed';
 
 interface CachedPetdexPreview {
   spritePath: string;
@@ -27,6 +37,73 @@ export interface ResolvedPetPreview {
   thumbnailIsSheet: boolean;
   spriteVersionNumber: number;
   sha256?: string;
+}
+
+export interface ActivePetAssets {
+  spriteUrl?: string;
+  manifestUrl?: string;
+}
+
+export async function fetchActivePet(): Promise<ResolvedActivePet> {
+  if (!isTauri) return DEFAULT_ACTIVE_PET;
+  return parseResolvedActivePet(await invoke<unknown>('get_active_pet'));
+}
+
+export const getActivePet = fetchActivePet;
+
+export async function setActivePet(
+  source: DirectLibrarySourceId,
+  slug: string,
+): Promise<ResolvedActivePet> {
+  if (!isTauri) {
+    throw new Error('请在 PetX 桌面版里更换当前伙伴。');
+  }
+  const reference = parseActivePetReference({
+    kind: 'installed',
+    source,
+    slug,
+  });
+  if (reference.kind !== 'installed') {
+    throw new Error('当前伙伴数据无法识别。');
+  }
+  return parseResolvedActivePet(
+    await invoke<unknown>('set_active_pet', {
+      source: reference.source,
+      slug: reference.slug,
+    }),
+  );
+}
+
+export async function resetActivePet(): Promise<ResolvedActivePet> {
+  if (!isTauri) return DEFAULT_ACTIVE_PET;
+  return parseResolvedActivePet(await invoke<unknown>('reset_active_pet'));
+}
+
+export async function listenToActivePetChanges(
+  onChange: (pet: ResolvedActivePet) => void,
+  onInvalidPayload: (error: unknown) => void = (error) =>
+    console.error('Unable to read the active pet change', error),
+): Promise<UnlistenFn> {
+  if (!isTauri) return () => {};
+  return listen<unknown>(ACTIVE_PET_CHANGED_EVENT, (event) => {
+    try {
+      onChange(parseResolvedActivePet(event.payload));
+    } catch (error) {
+      onInvalidPayload(error);
+    }
+  });
+}
+
+export function resolveActivePetAssets(
+  pet: ResolvedActivePet,
+): ActivePetAssets {
+  if (pet.reference.kind === 'builtin') {
+    return { manifestUrl: BUILTIN_PET_MANIFEST_URL };
+  }
+  if (pet.spritePath === null) {
+    throw new Error('当前伙伴缺少本地图集。');
+  }
+  return { spriteUrl: convertFileSrc(pet.spritePath) };
 }
 
 export async function fetchPetdexCatalog(): Promise<CatalogResponse> {

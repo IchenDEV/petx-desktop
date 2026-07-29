@@ -198,10 +198,12 @@ export function createDefaultCompanionPreferences(): CompanionPreferences {
   };
 }
 
-export function createDefaultCompanionState(): CompanionState {
+export function createDefaultCompanionState(
+  nickname = DEFAULT_NICKNAME,
+): CompanionState {
   return {
     version: COMPANION_STATE_VERSION,
-    nickname: DEFAULT_NICKNAME,
+    nickname: normalizeNickname(nickname),
     mood: 'calm',
     energy: 70,
     bond: 0,

@@ -9,13 +9,20 @@ import {
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isTauri } from '../platform';
 import {
+  fetchActivePet,
   fetchInstalledPets,
   fetchCatalog,
   installCatalogPet,
   installedSpriteUrl,
+  listenToActivePetChanges,
   openExternalPage,
+  resetActivePet,
+  setActivePet,
 } from './client';
 import {
+  activePetKey,
+  activePetMatchesInstalled,
+  DEFAULT_ACTIVE_PET,
   isDirectLibrarySource,
   LIBRARY_SOURCES,
   libraryPetKey,
@@ -25,12 +32,14 @@ import {
   type DirectLibrarySourceId,
   type InstalledPet,
   type LibrarySourceId,
+  type ResolvedActivePet,
 } from './model';
 import { PetPreview } from './PetPreview';
 
 const INITIAL_RESULT_LIMIT = 72;
 const RESULT_LIMIT_STEP = 72;
 const CATALOG_REFRESH_INTERVAL_MS = 10 * 60 * 1_000;
+const DEFAULT_ACTIVE_PET_KEY = activePetKey(DEFAULT_ACTIVE_PET.reference);
 
 type Notice = {
   tone: 'status' | 'error';
@@ -55,14 +64,23 @@ export function LibraryView() {
   const [onlyInstalled, setOnlyInstalled] = useState(false);
   const [resultLimit, setResultLimit] = useState(INITIAL_RESULT_LIMIT);
   const [installingKey, setInstallingKey] = useState<string | null>(null);
+  const [activePet, setActivePetState] = useState<ResolvedActivePet | null>(
+    null,
+  );
+  const [activePetLoading, setActivePetLoading] = useState(true);
+  const [switchingKey, setSwitchingKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const catalogsRef = useRef(catalogs);
   const catalogRequests = useRef(new Set<DirectLibrarySourceId>());
+  const activePetRef = useRef<ResolvedActivePet | null>(null);
+  const activePetRequest = useRef(0);
+  const activePetMutation = useRef<string | null>(null);
   const catalogLoadedAt = useRef<
     Partial<Record<DirectLibrarySourceId, number>>
   >({});
   catalogsRef.current = catalogs;
+  activePetRef.current = activePet;
   const deferredQuery = useDeferredValue(query);
   const directSourceId = isDirectLibrarySource(sourceId)
     ? sourceId
@@ -122,6 +140,43 @@ export function LibraryView() {
     }
   }, []);
 
+  const refreshActivePet = useCallback(async (reportError = false) => {
+    if (activePetMutation.current !== null) return;
+    const request = ++activePetRequest.current;
+    if (activePetRef.current === null) setActivePetLoading(true);
+    try {
+      const next = await fetchActivePet();
+      if (
+        request !== activePetRequest.current ||
+        activePetMutation.current !== null
+      ) {
+        return;
+      }
+      activePetRef.current = next;
+      setActivePetState(next);
+    } catch (error) {
+      if (
+        request !== activePetRequest.current ||
+        activePetMutation.current !== null
+      ) {
+        return;
+      }
+      if (reportError) {
+        setNotice({
+          tone: 'error',
+          text: `暂时无法确认当前伙伴：${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (
+        request === activePetRequest.current &&
+        activePetMutation.current === null
+      ) {
+        setActivePetLoading(false);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     document.body.classList.add('library-mode');
     void fetchInstalledPets()
@@ -135,6 +190,49 @@ export function LibraryView() {
       });
     return () => document.body.classList.remove('library-mode');
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let stopListening: (() => void) | undefined;
+
+    void refreshActivePet(true);
+    void listenToActivePetChanges(
+      () => {
+        if (!disposed) void refreshActivePet();
+      },
+      () => {
+        if (!disposed) void refreshActivePet(true);
+      },
+    )
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+        } else {
+          stopListening = unlisten;
+          void refreshActivePet();
+        }
+      })
+      .catch((error: unknown) => {
+        console.error('Unable to listen for active pet changes', error);
+      });
+
+    const refreshWhenFocused = () => void refreshActivePet();
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshActivePet();
+      }
+    };
+    window.addEventListener('focus', refreshWhenFocused);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+
+    return () => {
+      disposed = true;
+      activePetRequest.current += 1;
+      stopListening?.();
+      window.removeEventListener('focus', refreshWhenFocused);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [refreshActivePet]);
 
   useEffect(() => {
     if (
@@ -243,6 +341,21 @@ export function LibraryView() {
   const selectedInstalled = selectedItem && directSourceId
     ? installedByKey.get(libraryPetKey(directSourceId, selectedItem.slug))
     : undefined;
+  const selectedIsActive =
+    selectedItem !== null &&
+    directSourceId !== null &&
+    activePet !== null &&
+    activePetMatchesInstalled(
+      activePet.reference,
+      directSourceId,
+      selectedItem.slug,
+    );
+  const restoringDefault = switchingKey === DEFAULT_ACTIVE_PET_KEY;
+  const selectedIsSwitching =
+    (selectedItem !== null &&
+      directSourceId !== null &&
+      switchingKey === libraryPetKey(directSourceId, selectedItem.slug)) ||
+    (restoringDefault && selectedIsActive);
   const source = sourceById(sourceId);
   const visibleNotice =
     notice?.sourceId === undefined || notice.sourceId === sourceId
@@ -270,7 +383,7 @@ export function LibraryView() {
       setNotice({
         tone: 'status',
         sourceId: directSourceId,
-        text: `${pet.displayName} 已收进本地宠物库，可离线预览。`,
+        text: `${pet.displayName} 已收藏，可以立即设为当前伙伴；桌面上的伙伴没有改变。`,
       });
     } catch (error) {
       setNotice({
@@ -280,6 +393,112 @@ export function LibraryView() {
       });
     } finally {
       setInstallingKey(null);
+    }
+  };
+
+  const activateSelected = async () => {
+    if (
+      !selectedItem ||
+      !selectedInstalled ||
+      !directSourceId ||
+      activePetMutation.current !== null ||
+      selectedIsActive
+    ) {
+      return;
+    }
+
+    const key = libraryPetKey(directSourceId, selectedItem.slug);
+    const previousName = activePetRef.current?.displayName ?? '原来的伙伴';
+    const request = ++activePetRequest.current;
+    activePetMutation.current = key;
+    setSwitchingKey(key);
+    setNotice(null);
+    try {
+      const next = await setActivePet(directSourceId, selectedItem.slug);
+      if (
+        request !== activePetRequest.current ||
+        activePetMutation.current !== key
+      ) {
+        return;
+      }
+      activePetRef.current = next;
+      setActivePetState(next);
+      setActivePetLoading(false);
+      setNotice({
+        tone: 'status',
+        sourceId: directSourceId,
+        text: `${next.displayName} 现在正在桌面陪伴你。`,
+      });
+    } catch (error) {
+      if (
+        request !== activePetRequest.current ||
+        activePetMutation.current !== key
+      ) {
+        return;
+      }
+      setNotice({
+        tone: 'error',
+        sourceId: directSourceId,
+        text: `没能把 ${selectedItem.displayName} 设为当前伙伴，${previousName} 仍在陪伴你。${errorMessage(error)}`,
+      });
+    } finally {
+      if (
+        request === activePetRequest.current &&
+        activePetMutation.current === key
+      ) {
+        activePetMutation.current = null;
+        setSwitchingKey(null);
+      }
+    }
+  };
+
+  const restoreDefault = async () => {
+    if (
+      activePetMutation.current !== null ||
+      activePetRef.current?.reference.kind !== 'installed'
+    ) {
+      return;
+    }
+
+    const previousName = activePetRef.current.displayName;
+    const request = ++activePetRequest.current;
+    activePetMutation.current = DEFAULT_ACTIVE_PET_KEY;
+    setSwitchingKey(DEFAULT_ACTIVE_PET_KEY);
+    setNotice(null);
+    try {
+      const next = await resetActivePet();
+      if (
+        request !== activePetRequest.current ||
+        activePetMutation.current !== DEFAULT_ACTIVE_PET_KEY
+      ) {
+        return;
+      }
+      activePetRef.current = next;
+      setActivePetState(next);
+      setActivePetLoading(false);
+      setNotice({
+        tone: 'status',
+        text: 'Frieren 已回到桌面，其他伙伴仍留在本地宠物库。',
+      });
+    } catch (error) {
+      if (
+        request !== activePetRequest.current ||
+        activePetMutation.current !== DEFAULT_ACTIVE_PET_KEY
+      ) {
+        return;
+      }
+      setNotice({
+        tone: 'error',
+        text: `没能换回 Frieren，${previousName} 仍在陪伴你。${errorMessage(error)}`,
+      });
+    } finally {
+      if (
+        request === activePetRequest.current &&
+        activePetMutation.current === DEFAULT_ACTIVE_PET_KEY
+      ) {
+        activePetMutation.current = null;
+        setSwitchingKey(null);
+      }
     }
   };
 
@@ -404,14 +623,29 @@ export function LibraryView() {
                       );
                       const localPet = installedByKey.get(itemKey);
                       const installing = installingKey === itemKey;
+                      const current =
+                        activePet !== null &&
+                        activePetMatchesInstalled(
+                          activePet.reference,
+                          directSourceId,
+                          item.slug,
+                        );
+                      const switching =
+                        switchingKey === itemKey ||
+                        (restoringDefault && current);
+                      const rowClasses = [
+                        'library-pet-row',
+                        selectedItem?.slug === item.slug
+                          ? 'is-selected'
+                          : '',
+                        current ? 'is-current' : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' ');
                       return (
                         <li key={itemKey}>
                           <button
-                            className={
-                              selectedItem?.slug === item.slug
-                                ? 'library-pet-row is-selected'
-                                : 'library-pet-row'
-                            }
+                            className={rowClasses}
                             type="button"
                             aria-pressed={selectedItem?.slug === item.slug}
                             onClick={() => setSelectedSlug(item.slug)}
@@ -449,13 +683,19 @@ export function LibraryView() {
                             </span>
                             <span
                               className={
-                                installing
+                                installing || switching
                                   ? 'library-pet-row__state is-working'
+                                  : current
+                                    ? 'library-pet-row__state is-current'
                                   : 'library-pet-row__state'
                               }
                             >
                               {installing
                                 ? '检查中'
+                                : switching
+                                  ? '切换中'
+                                  : current
+                                    ? '正在陪伴'
                                 : localPet
                                   ? '已收藏'
                                   : ''}
@@ -491,9 +731,21 @@ export function LibraryView() {
                     installingKey ===
                     libraryPetKey(directSourceId, selectedItem.slug)
                   }
-                  libraryBusy={installingKey !== null}
+                  switching={selectedIsSwitching}
+                  current={selectedIsActive}
+                  activePetLoading={activePetLoading}
+                  libraryBusy={
+                    installingKey !== null || switchingKey !== null
+                  }
+                  activePetName={activePet?.displayName ?? null}
+                  canRestoreDefault={
+                    activePet?.reference.kind === 'installed'
+                  }
+                  restoringDefault={restoringDefault}
                   installAvailable={isTauri}
                   onInstall={installSelected}
+                  onActivate={activateSelected}
+                  onRestoreDefault={restoreDefault}
                   onOpenSource={() => void openPage(selectedItem.sourcePageUrl)}
                 />
               ) : (
@@ -519,9 +771,10 @@ export function LibraryView() {
               ? 'library-notice is-error'
               : 'library-notice'
           }
-          role="status"
+          role={visibleNotice?.tone === 'error' ? 'alert' : 'status'}
         >
-          {visibleNotice?.text ?? '收藏不会改变你和当前伙伴的关系。'}
+          {visibleNotice?.text ??
+            '收藏不会自动换走当前伙伴；你可以在详情里决定谁来陪伴。'}
         </p>
       </footer>
     </main>
@@ -533,9 +786,17 @@ interface PetDetailProps {
   sourceId: DirectLibrarySourceId;
   installed?: InstalledPet;
   installing: boolean;
+  switching: boolean;
+  current: boolean;
+  activePetLoading: boolean;
   libraryBusy: boolean;
+  activePetName: string | null;
+  canRestoreDefault: boolean;
+  restoringDefault: boolean;
   installAvailable: boolean;
   onInstall: () => void;
+  onActivate: () => void;
+  onRestoreDefault: () => void;
   onOpenSource: () => void;
 }
 
@@ -544,9 +805,17 @@ function PetDetail({
   sourceId,
   installed,
   installing,
+  switching,
+  current,
+  activePetLoading,
   libraryBusy,
+  activePetName,
+  canRestoreDefault,
+  restoringDefault,
   installAvailable,
   onInstall,
+  onActivate,
+  onRestoreDefault,
   onOpenSource,
 }: PetDetailProps) {
   const source = sourceById(sourceId);
@@ -582,7 +851,13 @@ function PetDetail({
           onReady={handlePreviewReady}
           onError={handlePreviewError}
         />
-        {installed ? <span className="library-preview-stamp">本地收藏</span> : null}
+        {switching ? (
+          <span className="library-preview-stamp is-working">正在切换</span>
+        ) : current ? (
+          <span className="library-preview-stamp is-current">当前伙伴</span>
+        ) : installed ? (
+          <span className="library-preview-stamp">本地收藏</span>
+        ) : null}
       </div>
 
       <div className="library-detail__title">
@@ -620,34 +895,68 @@ function PetDetail({
       </div>
 
       <button
-        className="library-install-button"
+        className={[
+          'library-install-button',
+          switching ? 'is-working' : '',
+          current ? 'is-current' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
         type="button"
         disabled={
-          Boolean(installed) ||
+          current ||
           libraryBusy ||
           installing ||
           !installAvailable ||
+          (Boolean(installed) && activePetLoading) ||
           previewState !== 'ready'
         }
-        onClick={onInstall}
+        onClick={installed ? onActivate : onInstall}
       >
         {installing
           ? '正在检查并收进宠物库…'
-          : installed
-            ? '已在本地宠物库'
+          : switching
+            ? restoringDefault
+              ? '正在换回默认伙伴…'
+              : '正在请它来到桌面…'
+            : current
+              ? '正在陪伴'
             : libraryBusy
               ? '正在处理另一只伙伴…'
+            : installed && activePetLoading
+              ? '正在确认当前伙伴…'
             : !installAvailable
-              ? '桌面版可收藏'
+              ? installed
+                ? '桌面版可更换伙伴'
+                : '桌面版可收藏'
               : previewState === 'failed'
                 ? '预览不可用'
                 : previewState === 'loading'
                   ? '正在准备预览…'
-                  : '收进宠物库'}
+                  : installed
+                    ? '设为当前伙伴'
+                    : '收进宠物库'}
       </button>
-      {installing ? (
+      {installing || switching ? (
         <div className="library-install-progress" aria-hidden="true">
           <span />
+        </div>
+      ) : null}
+      {canRestoreDefault ? (
+        <div className="library-active-companion">
+          <p>
+            <span>当前伙伴</span>
+            <strong>{activePetName}</strong>
+          </p>
+          <button
+            type="button"
+            disabled={libraryBusy || activePetLoading}
+            onClick={onRestoreDefault}
+          >
+            {restoringDefault
+              ? '正在请 Frieren 回来…'
+              : '换回 Frieren（默认伙伴）'}
+          </button>
         </div>
       ) : null}
       <button

@@ -52,6 +52,40 @@ export type DirectLibrarySourceId = Extract<
   'petdex' | 'petshare'
 >;
 
+export const BUILTIN_PET_ID = 'frieren' as const;
+export const BUILTIN_PET_MANIFEST_URL = '/pets/frieren/pet.json';
+
+export type ActivePetRef =
+  | {
+      kind: 'builtin';
+      id: typeof BUILTIN_PET_ID;
+    }
+  | {
+      kind: 'installed';
+      source: DirectLibrarySourceId;
+      slug: string;
+    };
+
+export interface ResolvedActivePet {
+  reference: ActivePetRef;
+  id: string;
+  displayName: string;
+  description: string | null;
+  spriteVersionNumber: 1 | 2;
+  spritePath: string | null;
+  manifestUrl: string | null;
+}
+
+export const DEFAULT_ACTIVE_PET: ResolvedActivePet = {
+  reference: { kind: 'builtin', id: BUILTIN_PET_ID },
+  id: BUILTIN_PET_ID,
+  displayName: 'Frieren',
+  description: 'A quiet white-haired desktop companion.',
+  spriteVersionNumber: 2,
+  spritePath: null,
+  manifestUrl: BUILTIN_PET_MANIFEST_URL,
+};
+
 export const LIBRARY_SOURCES: readonly LibrarySource[] = [
   {
     id: 'petdex',
@@ -154,4 +188,123 @@ export function libraryPetKey(
   slug: string,
 ) {
   return `${source}:${slug}`;
+}
+
+export function activePetKey(reference: ActivePetRef): string {
+  return reference.kind === 'builtin'
+    ? `builtin:${reference.id}`
+    : libraryPetKey(reference.source, reference.slug);
+}
+
+export function isSameActivePetReference(
+  left: ActivePetRef,
+  right: ActivePetRef,
+): boolean {
+  return activePetKey(left) === activePetKey(right);
+}
+
+export function activePetMatchesInstalled(
+  reference: ActivePetRef,
+  source: DirectLibrarySourceId,
+  slug: string,
+): boolean {
+  return reference.kind === 'installed' &&
+    reference.source === source &&
+    reference.slug === slug;
+}
+
+export function activePetDisplayDescriptor(pet: ResolvedActivePet) {
+  return {
+    displayName: pet.displayName,
+    sourceLabel:
+      pet.reference.kind === 'builtin'
+        ? '内置伙伴'
+        : sourceById(pet.reference.source).name,
+  };
+}
+
+export function parseActivePetReference(value: unknown): ActivePetRef {
+  if (!isRecord(value) || typeof value.kind !== 'string') {
+    throw invalidActivePetData();
+  }
+  if (value.kind === 'builtin') {
+    if (value.id !== BUILTIN_PET_ID) throw invalidActivePetData();
+    return { kind: 'builtin', id: BUILTIN_PET_ID };
+  }
+  if (
+    value.kind !== 'installed' ||
+    !isDirectLibrarySourceValue(value.source) ||
+    !isValidInstalledSlug(value.slug)
+  ) {
+    throw invalidActivePetData();
+  }
+  return {
+    kind: 'installed',
+    source: value.source,
+    slug: value.slug,
+  };
+}
+
+export function parseResolvedActivePet(value: unknown): ResolvedActivePet {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== 'string' ||
+    typeof value.displayName !== 'string' ||
+    value.displayName.trim() === '' ||
+    (value.description !== null && typeof value.description !== 'string') ||
+    (value.spriteVersionNumber !== 1 && value.spriteVersionNumber !== 2) ||
+    (value.spritePath !== null && typeof value.spritePath !== 'string') ||
+    (value.manifestUrl !== null && typeof value.manifestUrl !== 'string')
+  ) {
+    throw invalidActivePetData();
+  }
+
+  const reference = parseActivePetReference(value.reference);
+  if (reference.kind === 'builtin') {
+    if (
+      value.id !== reference.id ||
+      value.spritePath !== null ||
+      value.manifestUrl !== BUILTIN_PET_MANIFEST_URL
+    ) {
+      throw invalidActivePetData();
+    }
+  } else if (
+    value.id !== reference.slug ||
+    value.spritePath === null ||
+    value.spritePath.trim() === '' ||
+    value.manifestUrl !== null
+  ) {
+    throw invalidActivePetData();
+  }
+
+  return {
+    reference,
+    id: value.id,
+    displayName: value.displayName,
+    description: value.description,
+    spriteVersionNumber: value.spriteVersionNumber,
+    spritePath: value.spritePath,
+    manifestUrl: value.manifestUrl,
+  };
+}
+
+function isDirectLibrarySourceValue(
+  value: unknown,
+): value is DirectLibrarySourceId {
+  return value === 'petdex' || value === 'petshare';
+}
+
+function isValidInstalledSlug(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[a-z0-9][a-z0-9-]{0,79}$/.test(value)
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function invalidActivePetData() {
+  return new Error('当前伙伴数据无法识别。');
 }

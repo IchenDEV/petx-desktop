@@ -11,6 +11,26 @@ export default defineConfig({
     strictPort: true,
     host: host || false,
     hmr: host ? { protocol: 'ws', host, port: 1421 } : undefined,
+    proxy: {
+      '/__petdex/manifest': {
+        target: 'https://assets.petdex.dev',
+        changeOrigin: true,
+        headers: {
+          Origin: 'https://petdex.dev',
+          Referer: 'https://petdex.dev/',
+        },
+        rewrite: () => '/manifests/petdex-v2.json',
+      },
+      '/__petdex/assets': {
+        target: 'https://assets.petdex.dev',
+        changeOrigin: true,
+        headers: {
+          Origin: 'https://petdex.dev',
+          Referer: 'https://petdex.dev/',
+        },
+        rewrite: (path) => path.replace(/^\/__petdex\/assets/, ''),
+      },
+    },
   },
   envPrefix: ['VITE_', 'TAURI_'],
   build: {

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test": "vitest run",
     "typecheck": "tsc -b --pretty false",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -16,6 +17,7 @@
     "@petx/react": "0.2.0",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-autostart": "2.5.1",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
@@ -26,6 +28,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "latest",
     "typescript": "7.0.2",
-    "vite": "8.1.4"
+    "vite": "8.1.4",
+    "vitest": "4.1.10"
   }
 }

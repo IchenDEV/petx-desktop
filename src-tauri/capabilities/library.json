@@ -1,0 +1,25 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "library-capability",
+  "description": "Permissions required by the PetX companion library window",
+  "windows": ["library"],
+  "platforms": ["macOS", "windows", "linux"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-unminimize",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://petdex.dev/*" },
+        { "url": "https://github.com/*" },
+        { "url": "https://www.deviantart.com/*" },
+        { "url": "https://itch.io/*" },
+        { "url": "https://steamcommunity.com/*" }
+      ]
+    }
+  ]
+}

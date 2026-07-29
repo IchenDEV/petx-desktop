@@ -3,14 +3,6 @@ import { PetX } from '@petx/react';
 import type { CodexPetManifest } from '@petx/react';
 import type { CompanionMemory, MeaningfulInteraction, RelationshipStage } from './model';
 
-const petManifest: CodexPetManifest = {
-  id: 'frieren',
-  displayName: 'Frieren',
-  description: 'A quiet desktop companion.',
-  spriteVersionNumber: 2,
-  spritesheetPath: 'spritesheet.webp',
-};
-
 const relationshipCopy = {
   new: {
     label: '刚刚认识',
@@ -18,7 +10,7 @@ const relationshipCopy = {
   },
   familiar: {
     label: '渐渐熟悉',
-    note: '她已经开始记得你来过的日子。',
+    note: '它已经开始记得你来过的日子。',
   },
   close: {
     label: '很亲近了',
@@ -34,6 +26,9 @@ export interface MemoryJournalProps {
   nickname: string;
   memories: readonly CompanionMemory[];
   relationshipStage: RelationshipStage;
+  pet: CodexPetManifest;
+  manifestUrl?: string;
+  spriteUrl?: string;
   onClose: () => void;
 }
 
@@ -41,6 +36,9 @@ export function MemoryJournal({
   nickname,
   memories,
   relationshipStage,
+  pet,
+  manifestUrl,
+  spriteUrl,
   onClose,
 }: MemoryJournalProps) {
   const titleId = useId();
@@ -85,8 +83,10 @@ export function MemoryJournal({
         >
           <div className="memory-journal__portrait" aria-hidden="true">
             <PetX
-              pet={petManifest}
-              manifestUrl="/pets/frieren/pet.json"
+              pet={pet}
+              manifestUrl={manifestUrl}
+              src={spriteUrl}
+              spriteVersionNumber={pet.spriteVersionNumber}
               animation="idle"
               size={112}
             />
@@ -162,8 +162,8 @@ function memoryCopy(memory: CompanionMemory): { title: string; note?: string } {
       };
     case 'rename':
       return {
-        title: `你开始叫她「${memory.nickname}」`,
-        note: `在那之前，她叫「${memory.previousNickname}」。`,
+        title: `你开始叫它「${memory.nickname}」`,
+        note: `在那之前，它叫「${memory.previousNickname}」。`,
       };
     case 'keepsake':
       return {
@@ -182,15 +182,15 @@ function firstInteractionCopy(interaction: MeaningfulInteraction): string {
     case 'greet':
       return '从一句轻轻的问候开始。';
     case 'pet':
-      return '你第一次轻轻摸了摸她。';
+      return '你第一次轻轻摸了摸它。';
     case 'play':
       return '你们第一次一起玩了一会儿。';
     case 'feed':
-      return '你第一次和她分享了一份小点心。';
+      return '你第一次和它分享了一份小点心。';
     case 'rest':
       return '你们第一次安静地靠在一起休息。';
     case 'rename':
-      return '你给了她一个只属于这里的名字。';
+      return '你给了它一个只属于这里的名字。';
     default: {
       const exhaustiveCheck: never = interaction;
       return exhaustiveCheck;
@@ -203,11 +203,11 @@ function sharedDayCopy(interaction: MeaningfulInteraction): string {
     case 'greet':
       return '这一天，从彼此问好开始。';
     case 'pet':
-      return '你经过时，停下来陪了她一会儿。';
+      return '你经过时，停下来陪了它一会儿。';
     case 'play':
       return '你们把一点时间留给了玩耍。';
     case 'feed':
-      return '你记得为她留下一份小点心。';
+      return '你记得为它留下一份小点心。';
     case 'rest':
       return '你们把这一天的一小段时间留给了安静。';
     case 'rename':

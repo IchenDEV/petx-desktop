@@ -1,5 +1,45 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ActivePetSource {
+    Petdex,
+    Petshare,
+}
+
+impl ActivePetSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Petdex => "petdex",
+            Self::Petshare => "petshare",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ActivePetRef {
+    Builtin {
+        id: String,
+    },
+    Installed {
+        source: ActivePetSource,
+        slug: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedActivePet {
+    pub reference: ActivePetRef,
+    pub id: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub sprite_version_number: u8,
+    pub sprite_path: Option<String>,
+    pub manifest_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogItem {
@@ -98,6 +138,8 @@ pub(super) type PetshareManifest = Vec<PetshareCatalogEntry>;
 pub(super) struct InstallationRecord {
     pub source: String,
     pub remote_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub submitted_by: Option<String>,
     pub source_page_url: String,
     pub manifest_generated_at: String,

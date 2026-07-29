@@ -1,5 +1,5 @@
 import { PetX } from '@petx/react';
-import type { CodexPetLookDirection, CodexPetManifest } from '@petx/react';
+import type { CodexPetLookDirection } from '@petx/react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   useCallback,
@@ -27,7 +27,6 @@ import {
 } from './model';
 import {
   COMPANION_PREFERENCES_STORAGE_KEY,
-  COMPANION_STORAGE_KEY,
   loadCompanionState,
   saveCompanionRelationshipState,
 } from './storage';
@@ -65,14 +64,13 @@ import {
   companionNotificationIsAllowed,
   type CompanionNotificationStatus,
 } from '../system/model';
-
-const petManifest: CodexPetManifest = {
-  id: 'frieren',
-  displayName: 'Frieren',
-  description: 'A quiet white-haired desktop companion.',
-  spriteVersionNumber: 2,
-  spritesheetPath: 'spritesheet.webp',
-};
+import { resolveActivePetAssets } from '../library/client';
+import {
+  activePetKey,
+  type ResolvedActivePet,
+} from '../library/model';
+import { useActivePet } from '../library/useActivePet';
+import { createActivePetPresentation } from './activePetPresentation';
 
 type BubbleKind =
   | 'welcome'
@@ -90,10 +88,46 @@ const petClickDelayMs = 230;
 const dragThreshold = 6;
 
 export function CompanionView() {
+  const active = useActivePet();
+  if (active.pet === null) {
+    return (
+      <main
+        className="companion-shell companion-shell--resting"
+        aria-label="正在叫醒当前伙伴"
+        aria-busy="true"
+      />
+    );
+  }
+  return (
+    <ActiveCompanionView
+      key={activePetKey(active.pet.reference)}
+      activePet={active.pet}
+    />
+  );
+}
+
+interface ActiveCompanionViewProps {
+  activePet: ResolvedActivePet;
+}
+
+function ActiveCompanionView({ activePet }: ActiveCompanionViewProps) {
+  const activePetPresentation = useMemo(
+    () => createActivePetPresentation(activePet),
+    [activePet],
+  );
+  const {
+    profileKey,
+    profileStorageKey,
+    manifest: petManifest,
+  } = activePetPresentation;
   const [state, dispatch] = useReducer(
     companionReducer,
     undefined,
-    loadCompanionState,
+    () => loadCompanionState(undefined, profileKey, activePet.displayName),
+  );
+  const petAssets = useMemo(
+    () => resolveActivePetAssets(activePet),
+    [activePet],
   );
   const previewSurface = getPreviewSurface();
   const [surface, setSurface] = useState<CompanionSurface>(
@@ -184,7 +218,11 @@ export function CompanionView() {
   }, []);
 
   useEffect(() => {
-    const saved = saveCompanionRelationshipState(state);
+    const saved = saveCompanionRelationshipState(
+      state,
+      undefined,
+      profileKey,
+    );
     if (saved) {
       persistenceWarningShown.current = false;
       return;
@@ -198,7 +236,7 @@ export function CompanionView() {
       text: '刚才的记忆没能保存在本机。',
     });
     setSurface('bubble');
-  }, [state]);
+  }, [profileKey, state]);
 
   useEffect(() => {
     void setCompanionAlwaysOnTop(state.preferences.alwaysOnTop).catch(
@@ -432,16 +470,27 @@ export function CompanionView() {
 
   useEffect(() => {
     const applyLatestPreferences = () => {
-      const latestState = loadCompanionState();
+      const latestState = loadCompanionState(
+        undefined,
+        profileKey,
+        activePet.displayName,
+      );
       dispatch({
         type: 'update-preferences',
         patch: latestState.preferences,
       });
     };
     const replaceWithStoredState = () =>
-      dispatch({ type: 'replace-state', state: loadCompanionState() });
+      dispatch({
+        type: 'replace-state',
+        state: loadCompanionState(
+          undefined,
+          profileKey,
+          activePet.displayName,
+        ),
+      });
     const onStorage = (event: StorageEvent) => {
-      if (event.key === COMPANION_STORAGE_KEY) {
+      if (event.key === profileStorageKey) {
         replaceWithStoredState();
       } else if (event.key === COMPANION_PREFERENCES_STORAGE_KEY) {
         applyLatestPreferences();
@@ -480,7 +529,7 @@ export function CompanionView() {
       unlistenPreferences?.();
       unlistenReplacement?.();
     };
-  }, []);
+  }, [activePet.displayName, profileKey, profileStorageKey]);
 
   const showReturningBubble = useCallback(() => {
     if (state.firstInteractionAt !== null) {
@@ -735,6 +784,9 @@ export function CompanionView() {
           nickname={presentedState.nickname}
           memories={presentedState.memories}
           relationshipStage={getRelationshipStage(presentedState)}
+          pet={petManifest}
+          manifestUrl={petAssets.manifestUrl}
+          spriteUrl={petAssets.spriteUrl}
           onClose={closeJournal}
         />
       ) : null}
@@ -827,7 +879,9 @@ export function CompanionView() {
           <PetX
             key={presentation.instanceKey}
             pet={petManifest}
-            manifestUrl="/pets/frieren/pet.json"
+            manifestUrl={petAssets.manifestUrl}
+            src={petAssets.spriteUrl}
+            spriteVersionNumber={activePet.spriteVersionNumber}
             animation={presentation.animation}
             frame={presentation.frame}
             playing={presentation.playing}

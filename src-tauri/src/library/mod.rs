@@ -1,3 +1,4 @@
+pub(crate) mod active;
 mod model;
 
 use std::{
@@ -379,6 +380,7 @@ async fn install_catalog_pet(
     let installation = InstallationRecord {
         source: provider.id().to_string(),
         remote_id: slug.clone(),
+        display_name: Some(catalog_item.display_name.clone()),
         submitted_by: catalog_item.submitted_by.clone(),
         source_page_url: catalog_item.source_page_url.clone(),
         manifest_generated_at,

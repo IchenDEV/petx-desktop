@@ -20,6 +20,7 @@ export const COMPANION_STORAGE_KEY = 'petx-desktop:companion-state';
 export const COMPANION_PREFERENCES_STORAGE_KEY =
   'petx-desktop:companion-preferences';
 export const LEGACY_SETTINGS_STORAGE_KEY = 'petx-desktop:settings';
+export const DEFAULT_COMPANION_PROFILE_KEY = 'builtin:frieren';
 
 export interface StorageLike {
   getItem(key: string): string | null;
@@ -29,49 +30,55 @@ export interface StorageLike {
 
 export function loadCompanionState(
   storage: StorageLike | null = browserStorage(),
+  profileKey = DEFAULT_COMPANION_PROFILE_KEY,
+  defaultNickname = 'Frieren',
 ): CompanionState {
-  if (storage === null) return createDefaultCompanionState();
+  if (storage === null) return createDefaultCompanionState(defaultNickname);
 
   try {
-    const serialized = storage.getItem(COMPANION_STORAGE_KEY);
+    const storageKey = companionStateStorageKey(profileKey);
+    const serialized = storage.getItem(storageKey);
     if (serialized !== null) {
       if (isNewerCompanionState(serialized)) {
         return withStoredPreferences(
-          createDefaultCompanionState(),
+          createDefaultCompanionState(defaultNickname),
           storage,
         );
       }
-      const restored = decodeCompanionState(serialized);
+      const restored = decodeCompanionState(serialized, defaultNickname);
       if (restored !== null) {
         return withStoredPreferences(restored, storage);
       }
     }
 
-    const migrated = migrateLegacySettings(
-      storage.getItem(LEGACY_SETTINGS_STORAGE_KEY),
-    );
+    const migrated =
+      profileKey === DEFAULT_COMPANION_PROFILE_KEY
+        ? migrateLegacySettings(storage.getItem(LEGACY_SETTINGS_STORAGE_KEY))
+        : null;
     if (migrated !== null) {
-      storage.setItem(COMPANION_STORAGE_KEY, serializeCompanionState(migrated));
+      storage.setItem(storageKey, serializeCompanionState(migrated));
       return withStoredPreferences(migrated, storage);
     }
   } catch {
     // localStorage can be unavailable in private or restricted environments.
   }
 
-  const defaults = createDefaultCompanionState();
+  const defaults = createDefaultCompanionState(defaultNickname);
   return storage === null ? defaults : withStoredPreferences(defaults, storage);
 }
 
 export function saveCompanionState(
   state: CompanionState,
   storage: StorageLike | null = browserStorage(),
+  profileKey = DEFAULT_COMPANION_PROFILE_KEY,
 ): boolean {
   if (storage === null) return false;
 
   try {
-    const serialized = storage.getItem(COMPANION_STORAGE_KEY);
+    const storageKey = companionStateStorageKey(profileKey);
+    const serialized = storage.getItem(storageKey);
     if (isNewerCompanionState(serialized)) return false;
-    storage.setItem(COMPANION_STORAGE_KEY, serializeCompanionState(state));
+    storage.setItem(storageKey, serializeCompanionState(state));
     return true;
   } catch {
     return false;
@@ -86,15 +93,17 @@ export function saveCompanionState(
 export function saveCompanionRelationshipState(
   state: CompanionState,
   storage: StorageLike | null = browserStorage(),
+  profileKey = DEFAULT_COMPANION_PROFILE_KEY,
 ): boolean {
   if (storage === null) return false;
 
   try {
-    const serialized = storage.getItem(COMPANION_STORAGE_KEY);
+    const storageKey = companionStateStorageKey(profileKey);
+    const serialized = storage.getItem(storageKey);
     if (isNewerCompanionState(serialized)) return false;
     const nextState = withStoredPreferences(state, storage);
     storage.setItem(
-      COMPANION_STORAGE_KEY,
+      storageKey,
       serializeCompanionState(nextState),
     );
     return true;
@@ -110,18 +119,20 @@ export function saveCompanionRelationshipState(
 export function saveCompanionPreferences(
   preferences: CompanionPreferences,
   storage: StorageLike | null = browserStorage(),
+  profileKey = DEFAULT_COMPANION_PROFILE_KEY,
+  defaultNickname = 'Frieren',
 ): CompanionState | null {
   if (storage === null) return null;
 
   try {
-    const serialized = storage.getItem(COMPANION_STORAGE_KEY);
+    const serialized = storage.getItem(companionStateStorageKey(profileKey));
     if (isNewerCompanionState(serialized)) return null;
     const storedState =
       serialized === null
-        ? createDefaultCompanionState()
-        : decodeCompanionState(serialized);
+        ? createDefaultCompanionState(defaultNickname)
+        : decodeCompanionState(serialized, defaultNickname);
     const nextState = {
-      ...(storedState ?? createDefaultCompanionState()),
+      ...(storedState ?? createDefaultCompanionState(defaultNickname)),
       preferences,
     };
     storage.setItem(
@@ -136,11 +147,12 @@ export function saveCompanionPreferences(
 
 export function clearCompanionState(
   storage: StorageLike | null = browserStorage(),
+  profileKey = DEFAULT_COMPANION_PROFILE_KEY,
 ): boolean {
   if (storage === null) return false;
 
   try {
-    storage.removeItem(COMPANION_STORAGE_KEY);
+    storage.removeItem(companionStateStorageKey(profileKey));
     storage.removeItem(COMPANION_PREFERENCES_STORAGE_KEY);
     // Prevent a subsequent load from resurrecting settings from the pre-v1 key.
     storage.removeItem(LEGACY_SETTINGS_STORAGE_KEY);
@@ -155,10 +167,22 @@ export function serializeCompanionState(state: CompanionState): string {
 }
 
 export function deserializeCompanionState(serialized: string): CompanionState {
-  return decodeCompanionState(serialized) ?? createDefaultCompanionState();
+  return decodeCompanionState(serialized, 'Frieren') ??
+    createDefaultCompanionState();
 }
 
-function decodeCompanionState(serialized: string): CompanionState | null {
+export function companionStateStorageKey(
+  profileKey = DEFAULT_COMPANION_PROFILE_KEY,
+): string {
+  return profileKey === DEFAULT_COMPANION_PROFILE_KEY
+    ? COMPANION_STORAGE_KEY
+    : `${COMPANION_STORAGE_KEY}:profile:${encodeURIComponent(profileKey)}`;
+}
+
+function decodeCompanionState(
+  serialized: string,
+  defaultNickname: string,
+): CompanionState | null {
   let value: unknown;
   try {
     value = JSON.parse(serialized);
@@ -173,7 +197,7 @@ function decodeCompanionState(serialized: string): CompanionState | null {
     return null;
   }
 
-  const defaults = createDefaultCompanionState();
+  const defaults = createDefaultCompanionState(defaultNickname);
   const preferences = parsePreferences(value.preferences, defaults.preferences);
   const memories = Array.isArray(value.memories)
     ? value.memories

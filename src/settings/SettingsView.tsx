@@ -43,6 +43,11 @@ import {
   type CompanionNotificationStatus,
   type SystemPreferences,
 } from '../system/model';
+import {
+  activePetKey,
+  DEFAULT_ACTIVE_PET,
+} from '../library/model';
+import { useActivePet } from '../library/useActivePet';
 
 const STATE_CHANGED_EVENT = 'petx://state-changed';
 const STATE_REPLACED_EVENT = 'petx://state-replaced';
@@ -88,6 +93,18 @@ type Notice = {
 };
 
 export function SettingsView() {
+  const active = useActivePet();
+  const activePet = active.pet ?? DEFAULT_ACTIVE_PET;
+  const profileKey = activePetKey(activePet.reference);
+  const loadCurrentCompanionState = useCallback(
+    () =>
+      loadCompanionState(
+        undefined,
+        profileKey,
+        activePet.displayName,
+      ),
+    [activePet.displayName, profileKey],
+  );
   const [state, setState] = useState<CompanionState>(loadCompanionState);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
@@ -104,7 +121,7 @@ export function SettingsView() {
 
   const commitState = useCallback(
     (nextState: CompanionState, successMessage?: string): boolean => {
-      if (!saveCompanionState(nextState)) {
+      if (!saveCompanionState(nextState, undefined, profileKey)) {
         setNotice({
           tone: 'error',
           message: '设置没有保存。请检查本机存储权限后再试。',
@@ -129,7 +146,7 @@ export function SettingsView() {
       );
       return true;
     },
-    [],
+    [profileKey],
   );
 
   const commitPreferences = useCallback(
@@ -137,7 +154,12 @@ export function SettingsView() {
       preferences: CompanionPreferences,
       successMessage?: string,
     ): boolean => {
-      const nextState = saveCompanionPreferences(preferences);
+      const nextState = saveCompanionPreferences(
+        preferences,
+        undefined,
+        profileKey,
+        activePet.displayName,
+      );
       if (nextState === null) {
         setNotice({
           tone: 'error',
@@ -163,15 +185,15 @@ export function SettingsView() {
       );
       return true;
     },
-    [],
+    [activePet.displayName, profileKey],
   );
 
   const applyPreferences = useCallback(
     (patch: CompanionPreferencesPatch) => {
-      const latestState = loadCompanionState();
+      const latestState = loadCurrentCompanionState();
       commitPreferences(updatePreferences(latestState, patch).preferences);
     },
-    [commitPreferences],
+    [commitPreferences, loadCurrentCompanionState],
   );
 
   const closeSettings = useCallback(async () => {
@@ -241,8 +263,12 @@ export function SettingsView() {
   }, [commitSystemPreferences]);
 
   useEffect(() => {
+    setState(loadCurrentCompanionState());
+  }, [loadCurrentCompanionState]);
+
+  useEffect(() => {
     const refreshState = () => {
-      setState(loadCompanionState());
+      setState(loadCurrentCompanionState());
       setSystemPreferences(loadSystemPreferences());
     };
     const handleFocus = () => {
@@ -255,7 +281,7 @@ export function SettingsView() {
       window.removeEventListener('focus', handleFocus);
       window.removeEventListener('storage', refreshState);
     };
-  }, [refreshNotificationStatus]);
+  }, [loadCurrentCompanionState, refreshNotificationStatus]);
 
   useEffect(() => {
     void refreshNotificationStatus();
@@ -273,7 +299,7 @@ export function SettingsView() {
         if (!active) return;
         setAutostartAvailable(true);
         setAutostartPending(false);
-        const latestState = loadCompanionState();
+        const latestState = loadCurrentCompanionState();
         if (latestState.preferences.launchAtLogin !== enabled) {
           commitPreferences(
             updatePreferences(latestState, { launchAtLogin: enabled })
@@ -295,7 +321,7 @@ export function SettingsView() {
     return () => {
       active = false;
     };
-  }, [commitPreferences]);
+  }, [commitPreferences, loadCurrentCompanionState]);
 
   useEffect(() => {
     if (confirmingClear) cancelClearButtonRef.current?.focus();
@@ -318,14 +344,14 @@ export function SettingsView() {
   const handleAlwaysOnTopChange = async (checked: boolean) => {
     if (alwaysOnTopPending) return;
 
-    const previousState = loadCompanionState();
+    const previousState = loadCurrentCompanionState();
     const previousValue = previousState.preferences.alwaysOnTop;
     setAlwaysOnTopPending(true);
     setNotice(null);
 
     try {
       await setCompanionAlwaysOnTop(checked);
-      const latestState = loadCompanionState();
+      const latestState = loadCurrentCompanionState();
       const committed = commitPreferences(
         updatePreferences(latestState, { alwaysOnTop: checked }).preferences,
       );
@@ -350,14 +376,14 @@ export function SettingsView() {
       return;
     }
 
-    const previousState = loadCompanionState();
+    const previousState = loadCurrentCompanionState();
     const previousValue = previousState.preferences.launchAtLogin;
     setAutostartPending(true);
     setNotice(null);
 
     try {
       await (checked ? enableAutostart() : disableAutostart());
-      const latestState = loadCompanionState();
+      const latestState = loadCurrentCompanionState();
       const committed = commitPreferences(
         updatePreferences(latestState, { launchAtLogin: checked }).preferences,
       );
@@ -376,7 +402,7 @@ export function SettingsView() {
   };
 
   const clearRelationshipMemory = () => {
-    const latestState = loadCompanionState();
+    const latestState = loadCurrentCompanionState();
     const nextState: CompanionState = {
       ...latestState,
       mood: 'calm',

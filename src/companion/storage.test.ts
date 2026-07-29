@@ -9,6 +9,7 @@ import {
 import {
   COMPANION_STATE_VERSION,
   createDefaultCompanionState,
+  feed,
   greet,
 } from './model';
 
@@ -114,5 +115,55 @@ describe('companion state migration', () => {
     expect(JSON.parse(storage.getItem(COMPANION_STORAGE_KEY) ?? '{}')).toEqual({
       version: COMPANION_STATE_VERSION + 1,
     });
+  });
+
+  it('keeps relationship, care, and nickname isolated for each companion', () => {
+    const storage = new MemoryStorage();
+    const frieren = {
+      ...greet(
+        createDefaultCompanionState(),
+        new Date('2026-07-30T08:00:00.000Z'),
+      ),
+      nickname: '小芙',
+    };
+    const paperclip = {
+      ...feed(
+        greet(
+          createDefaultCompanionState('Paperclip'),
+          new Date('2026-07-31T08:00:00.000Z'),
+        ),
+        new Date('2026-07-31T08:10:00.000Z'),
+      ),
+      nickname: '小夹子',
+      bond: 35,
+    };
+
+    expect(
+      saveCompanionState(frieren, storage, 'builtin:frieren'),
+    ).toBe(true);
+    expect(
+      saveCompanionState(paperclip, storage, 'petdex:paperclip'),
+    ).toBe(true);
+
+    expect(
+      loadCompanionState(storage, 'builtin:frieren').nickname,
+    ).toBe('小芙');
+    expect(
+      loadCompanionState(storage, 'petdex:paperclip', 'Paperclip'),
+    ).toMatchObject({
+      nickname: '小夹子',
+      bond: 35,
+      firstInteractionAt: '2026-07-31T08:00:00.000Z',
+      care: {
+        satiety: 96,
+        satietyUpdatedAt: '2026-07-31T08:10:00.000Z',
+        lastFedAt: '2026-07-31T08:10:00.000Z',
+        lastPlayedAt: null,
+        lastRestedAt: null,
+      },
+    });
+    expect(
+      loadCompanionState(storage, 'petshare:paperclip', 'Paperclip'),
+    ).toEqual(createDefaultCompanionState('Paperclip'));
   });
 });

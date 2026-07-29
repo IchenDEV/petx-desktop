@@ -1644,6 +1644,17 @@ body.library-mode {
   box-shadow: inset 0 0 0 1px #76958d;
 }
 
+.library-pet-row.is-current:not(.is-selected) {
+  background: #f0f5ef;
+  box-shadow: inset 3px 0 0 var(--library-teal);
+}
+
+.library-pet-row.is-current.is-selected {
+  box-shadow:
+    inset 3px 0 0 var(--library-teal),
+    inset 0 0 0 1px #76958d;
+}
+
 .library-pet-row:focus-visible {
   outline-offset: -3px;
 }
@@ -1741,6 +1752,12 @@ body.library-mode {
   color: #8a6440;
 }
 
+.library-pet-row__state.is-current {
+  min-width: 50px;
+  color: var(--library-teal-dark);
+  letter-spacing: 0.03em;
+}
+
 .library-load-more {
   display: block;
   min-width: 150px;
@@ -1828,6 +1845,20 @@ body.library-mode {
   font-weight: 760;
   letter-spacing: 0.09em;
   transform: rotate(-2deg);
+}
+
+.library-preview-stamp.is-current {
+  border-color: var(--library-teal-dark);
+  background: #e4eee8;
+  color: var(--library-teal-dark);
+  box-shadow: 0 1px 0 rgb(52 88 83 / 12%);
+}
+
+.library-preview-stamp.is-working {
+  border-color: #9c763d;
+  background: #f5ead3;
+  color: #795a2f;
+  animation: library-status-pulse 1.1s ease-in-out infinite alternate;
 }
 
 .library-detail__title {
@@ -1945,6 +1976,18 @@ body.library-mode {
   cursor: default;
 }
 
+.library-install-button.is-current:disabled {
+  border-color: #6f9188;
+  background: #dfeae4;
+  color: var(--library-teal-dark);
+}
+
+.library-install-button.is-working:disabled {
+  border-color: #937143;
+  background: #a78651;
+  color: #fffaf0;
+}
+
 .library-install-progress {
   height: 3px;
   margin-top: 6px;
@@ -1960,6 +2003,67 @@ body.library-mode {
   border-radius: inherit;
   background: var(--library-teal);
   animation: library-progress 1.1s ease-in-out infinite alternate;
+}
+
+.library-active-companion {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid #c7b99f;
+  border-radius: 3px;
+  background: #eee6d7;
+}
+
+.library-active-companion p {
+  min-width: 0;
+  margin: 0;
+}
+
+.library-active-companion p span,
+.library-active-companion p strong {
+  display: block;
+}
+
+.library-active-companion p span {
+  color: #7b7468;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+}
+
+.library-active-companion p strong {
+  overflow: hidden;
+  margin-top: 3px;
+  color: #3e5752;
+  font-family: ui-serif, "Songti SC", "STSong", Georgia, serif;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-active-companion button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 1px solid #749188;
+  border-radius: 3px;
+  background: #f7f3e9;
+  color: var(--library-teal-dark);
+  font-size: 9px;
+  font-weight: 680;
+  cursor: pointer;
+}
+
+.library-active-companion button:hover:not(:disabled) {
+  background: #e3ede7;
+}
+
+.library-active-companion button:disabled {
+  cursor: default;
+  opacity: 0.58;
 }
 
 .library-source-link {
@@ -2232,6 +2336,15 @@ body.library-mode {
   }
   to {
     transform: translateX(180%);
+  }
+}
+
+@keyframes library-status-pulse {
+  from {
+    opacity: 0.68;
+  }
+  to {
+    opacity: 1;
   }
 }
 

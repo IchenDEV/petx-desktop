@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "PetX Desktop",
-        "width": 600,
-        "height": 460,
+        "width": 248,
+        "height": 276,
         "minWidth": 248,
         "minHeight": 276,
         "resizable": false,
@@ -27,11 +27,54 @@
         "skipTaskbar": true,
         "visibleOnAllWorkspaces": true,
         "focus": false,
+        "acceptFirstMouse": true,
         "preventOverflow": true
+      },
+      {
+        "label": "settings",
+        "url": "index.html?view=settings",
+        "title": "PetX 设置",
+        "width": 600,
+        "height": 460,
+        "minWidth": 520,
+        "minHeight": 420,
+        "center": true,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false,
+        "shadow": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "visibleOnAllWorkspaces": false,
+        "visible": false,
+        "focus": false
+      },
+      {
+        "label": "library",
+        "url": "index.html?view=library",
+        "title": "发现新伙伴",
+        "width": 1080,
+        "height": 720,
+        "minWidth": 860,
+        "minHeight": 600,
+        "center": true,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false,
+        "shadow": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "visibleOnAllWorkspaces": false,
+        "visible": false,
+        "focus": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost https://asset.localhost; style-src 'self' 'unsafe-inline'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/pets/**", "$APPCACHE/pet-previews/**"]
+      }
     }
   },
   "bundle": {

@@ -30,6 +30,19 @@ import {
   notifyMainWindow,
   setCompanionAlwaysOnTop,
 } from '../platform';
+import {
+  getCompanionNotificationStatus,
+  requestCompanionNotificationPermission,
+  sendCompanionNotification,
+} from '../system/client';
+import {
+  companionNotificationIsAllowed,
+  loadSystemPreferences,
+  saveSystemPreferences,
+  SYSTEM_PREFERENCES_CHANGED_EVENT,
+  type CompanionNotificationStatus,
+  type SystemPreferences,
+} from '../system/model';
 
 const STATE_CHANGED_EVENT = 'petx://state-changed';
 const STATE_REPLACED_EVENT = 'petx://state-replaced';
@@ -81,6 +94,12 @@ export function SettingsView() {
   const [autostartAvailable, setAutostartAvailable] = useState(!isTauri);
   const [autostartPending, setAutostartPending] = useState(isTauri);
   const [alwaysOnTopPending, setAlwaysOnTopPending] = useState(false);
+  const [systemPreferences, setSystemPreferences] =
+    useState<SystemPreferences>(loadSystemPreferences);
+  const [notificationStatus, setNotificationStatus] =
+    useState<CompanionNotificationStatus>('notDetermined');
+  const [notificationPending, setNotificationPending] = useState(false);
+  const notificationStatusRequest = useRef(0);
   const cancelClearButtonRef = useRef<HTMLButtonElement>(null);
 
   const commitState = useCallback(
@@ -172,15 +191,78 @@ export function SettingsView() {
     }
   }, []);
 
+  const commitSystemPreferences = useCallback(
+    (next: SystemPreferences, successMessage?: string) => {
+      if (!saveSystemPreferences(next)) {
+        setNotice({
+          tone: 'error',
+          message: '桌面感知偏好没有保存，请检查本机存储权限。',
+        });
+        return false;
+      }
+      setSystemPreferences(next);
+      setNotice(
+        successMessage
+          ? { tone: 'status', message: successMessage }
+          : null,
+      );
+      void notifyMainWindow(
+        SYSTEM_PREFERENCES_CHANGED_EVENT,
+        next,
+      ).catch((error: unknown) => {
+        console.error('Unable to notify system preference changes', error);
+      });
+      return true;
+    },
+    [],
+  );
+
+  const refreshNotificationStatus = useCallback(async () => {
+    const request = ++notificationStatusRequest.current;
+    try {
+      const status = await getCompanionNotificationStatus();
+      if (request !== notificationStatusRequest.current) return;
+      setNotificationStatus(status);
+      if (
+        !companionNotificationIsAllowed(status) &&
+        loadSystemPreferences().companionNotifications
+      ) {
+        const next = {
+          ...loadSystemPreferences(),
+          companionNotifications: false,
+        };
+        commitSystemPreferences(next);
+      }
+    } catch (error) {
+      if (request === notificationStatusRequest.current) {
+        console.error('Unable to read PetX notification status', error);
+      }
+    }
+  }, [commitSystemPreferences]);
+
   useEffect(() => {
-    const refreshState = () => setState(loadCompanionState());
-    window.addEventListener('focus', refreshState);
+    const refreshState = () => {
+      setState(loadCompanionState());
+      setSystemPreferences(loadSystemPreferences());
+    };
+    const handleFocus = () => {
+      refreshState();
+      void refreshNotificationStatus();
+    };
+    window.addEventListener('focus', handleFocus);
     window.addEventListener('storage', refreshState);
     return () => {
-      window.removeEventListener('focus', refreshState);
+      window.removeEventListener('focus', handleFocus);
       window.removeEventListener('storage', refreshState);
     };
-  }, []);
+  }, [refreshNotificationStatus]);
+
+  useEffect(() => {
+    void refreshNotificationStatus();
+    return () => {
+      notificationStatusRequest.current += 1;
+    };
+  }, [refreshNotificationStatus]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -315,6 +397,58 @@ export function SettingsView() {
 
     if (commitState(nextState, '相处记忆已清除。')) {
       setConfirmingClear(false);
+    }
+  };
+
+  const handleCompanionNotificationsChange = async (checked: boolean) => {
+    if (notificationPending) return;
+    if (!checked) {
+      commitSystemPreferences({
+        ...systemPreferences,
+        companionNotifications: false,
+      });
+      return;
+    }
+
+    setNotificationPending(true);
+    setNotice(null);
+    try {
+      const status =
+        companionNotificationIsAllowed(notificationStatus)
+          ? notificationStatus
+          : await requestCompanionNotificationPermission();
+      setNotificationStatus(status);
+      if (!companionNotificationIsAllowed(status)) {
+        commitSystemPreferences({
+          ...systemPreferences,
+          companionNotifications: false,
+        });
+        setNotice({
+          tone: 'error',
+          message:
+            status === 'denied'
+              ? '系统没有允许通知；可以稍后在 macOS 系统设置中调整。'
+              : '当前系统暂不支持 PetX 通知。',
+        });
+        return;
+      }
+
+      if (
+        commitSystemPreferences(
+          { ...systemPreferences, companionNotifications: true },
+          '已开启 PetX 自己的系统问候。',
+        )
+      ) {
+        await sendCompanionNotification('test');
+      }
+    } catch (error) {
+      console.error('Unable to enable companion notifications', error);
+      setNotice({
+        tone: 'error',
+        message: '没有开启系统通知，请稍后再试。',
+      });
+    } finally {
+      setNotificationPending(false);
     }
   };
 
@@ -508,6 +642,74 @@ export function SettingsView() {
           />
         </section>
 
+        <section
+          className="settings-section settings-section--awareness"
+          aria-labelledby="desktop-awareness-title"
+        >
+          <div className="settings-section-heading">
+            <h2 id="desktop-awareness-title">生活在这台 Mac 上</h2>
+            <p>
+              它可以留意当下的动静并做出轻微反应；这些状态不进入相处记忆。
+            </p>
+          </div>
+          <SettingRow
+            title="桌面动静"
+            description="感知离开与回来、电量、CPU 和聚合网络流量；关闭后停止采样。"
+            control={
+              <Toggle
+                label="感知桌面动静"
+                checked={systemPreferences.desktopAwareness}
+                onChange={(checked) =>
+                  commitSystemPreferences({
+                    ...systemPreferences,
+                    desktopAwareness: checked,
+                  })
+                }
+              />
+            }
+          />
+          <SettingRow
+            title="正在使用的 App"
+            description="只看应用名称，不读取窗口标题、文档或输入内容；默认关闭。"
+            control={
+              <Toggle
+                label="感知前台应用"
+                checked={systemPreferences.foregroundAppAwareness}
+                onChange={(checked) =>
+                  commitSystemPreferences({
+                    ...systemPreferences,
+                    foregroundAppAwareness: checked,
+                  })
+                }
+              />
+            }
+          />
+          <SettingRow
+            title="PetX 系统问候"
+            description={notificationDescription(notificationStatus)}
+            control={
+              <Toggle
+                label="允许 PetX 发送自己的系统通知"
+                checked={
+                  systemPreferences.companionNotifications &&
+                  companionNotificationIsAllowed(notificationStatus)
+                }
+                disabled={
+                  notificationPending ||
+                  notificationStatus === 'unsupported'
+                }
+                onChange={(checked) =>
+                  void handleCompanionNotificationsChange(checked)
+                }
+              />
+            }
+          />
+          <p className="settings-privacy-note">
+            macOS 不向 PetX 提供其他 App 的通知内容；PetX
+            也不会读取通知中心数据库、请求地址、域名、正文或单个进程流量。
+          </p>
+        </section>
+
         <fieldset className="settings-section settings-section--size">
           <legend>宠物大小</legend>
           <div className="settings-choice-grid settings-choice-grid--size">
@@ -698,4 +900,17 @@ function nearestSizePreset(size: number): (typeof SIZE_OPTIONS)[number]['value']
     }
   }
   return nearest.value;
+}
+
+function notificationDescription(status: CompanionNotificationStatus) {
+  if (companionNotificationIsAllowed(status)) {
+    return '只发送 PetX 自己的问候；关闭后即使系统仍保留权限也不会发送。';
+  }
+  if (status === 'denied') {
+    return '系统已拒绝，可在 macOS 系统设置的“通知”中重新允许。';
+  }
+  if (status === 'unsupported') {
+    return '当前系统不支持这项功能。';
+  }
+  return '开启时才会向 macOS 请求权限，不会在启动时打扰你。';
 }

@@ -1,5 +1,6 @@
 export type LibrarySourceId =
   | 'petdex'
+  | 'petshare'
   | 'github'
   | 'deviantart'
   | 'itch'
@@ -18,6 +19,7 @@ export interface LibrarySource {
 export interface CatalogItem {
   slug: string;
   displayName: string;
+  description: string | null;
   kind: string;
   submittedBy: string | null;
   spritesheetUrl: string;
@@ -33,6 +35,7 @@ export interface CatalogResponse {
 }
 
 export interface InstalledPet {
+  source: DirectLibrarySourceId;
   slug: string;
   displayName: string;
   description: string | null;
@@ -43,6 +46,11 @@ export interface InstalledPet {
   installedAtEpochSeconds: number;
   sha256: string;
 }
+
+export type DirectLibrarySourceId = Extract<
+  LibrarySourceId,
+  'petdex' | 'petshare'
+>;
 
 export const LIBRARY_SOURCES: readonly LibrarySource[] = [
   {
@@ -57,6 +65,20 @@ export const LIBRARY_SOURCES: readonly LibrarySource[] = [
       '目录条目已经过 Petdex 审核，但不代表底层角色版权已获授权。',
       'PetX 只下载静态清单与图集，不会运行脚本或安装器。',
       '收藏后保留投稿者、来源页和文件摘要。',
+    ],
+  },
+  {
+    id: 'petshare',
+    name: 'PetShare',
+    capability: 'direct',
+    url: 'https://petshare.idevlab.dev/',
+    shortNote: '可直接收藏',
+    description:
+      '一个公开的 Codex 桌面人物目录。PetX 会逐项获取清单和图集，在本机校验后收藏。',
+    constraints: [
+      '站点当前没有提供作者、作品来源或许可字段。',
+      '“可以下载”不等于允许再分发、公开展示或商用。',
+      'PetX 不解压站点 ZIP，只读取并校验静态清单与 WebP 图集。',
     ],
   },
   {
@@ -119,4 +141,17 @@ export const LIBRARY_SOURCES: readonly LibrarySource[] = [
 
 export function sourceById(id: LibrarySourceId): LibrarySource {
   return LIBRARY_SOURCES.find((source) => source.id === id) ?? LIBRARY_SOURCES[0];
+}
+
+export function isDirectLibrarySource(
+  id: LibrarySourceId,
+): id is DirectLibrarySourceId {
+  return id === 'petdex' || id === 'petshare';
+}
+
+export function libraryPetKey(
+  source: DirectLibrarySourceId,
+  slug: string,
+) {
+  return `${source}:${slug}`;
 }

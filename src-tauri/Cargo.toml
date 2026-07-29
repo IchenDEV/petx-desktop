@@ -18,7 +18,51 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+sysinfo = { version = "0.38.4", default-features = false, features = ["network", "system"] }
 tauri = { version = "2", features = ["macos-private-api", "protocol-asset", "tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-opener = "2.5.4"
 tokio = { version = "1", features = ["sync"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "NSRunningApplication",
+  "NSWorkspace",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "CFArray",
+  "CFDictionary",
+  "CFNumber",
+  "CFString",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "CGEventSource",
+  "CGEventTypes",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "NSBundle",
+  "NSError",
+  "NSObject",
+  "NSProcessInfo",
+  "NSString",
+] }
+objc2-io-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "ps",
+] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "block2",
+  "UNNotificationContent",
+  "UNNotificationRequest",
+  "UNNotificationSettings",
+  "UNNotificationTrigger",
+  "UNUserNotificationCenter",
+] }
+system-configuration = "0.7"

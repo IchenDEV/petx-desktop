@@ -1,6 +1,7 @@
 mod model;
 
 use std::{
+    collections::HashSet,
     fs,
     io::Cursor,
     path::{Path, PathBuf},
@@ -15,14 +16,22 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 pub use model::{CatalogItem, CatalogResponse, InstalledPet, PetdexPreview};
-use model::{CompactManifest, InstallationRecord, PetManifest, PreviewRecord};
+use model::{
+    CompactManifest, InstallationRecord, PetManifest, PetshareCatalogEntry, PetshareManifest,
+    PreviewRecord,
+};
 
 const MANIFEST_URL: &str = "https://assets.petdex.dev/manifests/petdex-v2.json";
 const ASSET_BASE: &str = "https://assets.petdex.dev";
 const ASSET_HOST: &str = "assets.petdex.dev";
 const MANIFEST_CACHE_FILE: &str = "petdex-manifest-v2.json";
 const PREVIEW_CACHE_DIRECTORY: &str = "pet-previews";
+const PETSHARE_BASE: &str = "https://petshare.idevlab.dev";
+const PETSHARE_HOST: &str = "petshare.idevlab.dev";
+const PETSHARE_MANIFEST_URL: &str = "https://petshare.idevlab.dev/pets.json";
+const PETSHARE_MANIFEST_CACHE_FILE: &str = "petshare-manifest-v1.json";
 const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PETSHARE_MANIFEST_BYTES: usize = 64 * 1024;
 const MAX_PET_JSON_BYTES: usize = 64 * 1024;
 const MAX_SPRITESHEET_BYTES: usize = 20 * 1024 * 1024;
 const MAX_THUMBNAIL_BYTES: u64 = 2 * 1024 * 1024;
@@ -40,9 +49,39 @@ const EXPECTED_FIELDS: [&str; 7] = [
     "zip",
 ];
 
+#[derive(Clone, Copy)]
+enum LibraryProvider {
+    Petdex,
+    Petshare,
+}
+
+impl LibraryProvider {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Petdex => "petdex",
+            Self::Petshare => "petshare",
+        }
+    }
+
+    fn referer(self) -> &'static str {
+        match self {
+            Self::Petdex => "https://petdex.dev/",
+            Self::Petshare => "https://petshare.idevlab.dev/",
+        }
+    }
+
+    fn validate_url(self, url: &str) -> Result<(), String> {
+        match self {
+            Self::Petdex => validate_asset_url(url),
+            Self::Petshare => validate_petshare_asset_url(url),
+        }
+    }
+}
+
 pub struct LibraryState {
     client: Client,
-    manifest: Mutex<Option<Arc<CompactManifest>>>,
+    petdex_manifest: Mutex<Option<Arc<CompactManifest>>>,
+    petshare_manifest: Mutex<Option<Arc<PetshareManifest>>>,
     image_permits: Semaphore,
     preview_cache_lock: AsyncMutex<()>,
 }
@@ -58,24 +97,41 @@ impl LibraryState {
             .map_err(|error| format!("无法初始化宠物库网络连接：{error}"))?;
         Ok(Self {
             client,
-            manifest: Mutex::new(None),
+            petdex_manifest: Mutex::new(None),
+            petshare_manifest: Mutex::new(None),
             image_permits: Semaphore::new(MAX_PARALLEL_IMAGE_JOBS),
             preview_cache_lock: AsyncMutex::new(()),
         })
     }
 
-    fn cached_manifest(&self) -> Result<Option<Arc<CompactManifest>>, String> {
-        self.manifest
+    fn cached_petdex_manifest(&self) -> Result<Option<Arc<CompactManifest>>, String> {
+        self.petdex_manifest
             .lock()
             .map(|manifest| manifest.clone())
             .map_err(|_| "Petdex 目录缓存暂时无法读取。".to_string())
     }
 
-    fn remember_manifest(&self, manifest: &CompactManifest) -> Result<(), String> {
+    fn remember_petdex_manifest(&self, manifest: &CompactManifest) -> Result<(), String> {
         let mut cached = self
-            .manifest
+            .petdex_manifest
             .lock()
             .map_err(|_| "Petdex 目录缓存暂时无法更新。".to_string())?;
+        *cached = Some(Arc::new(manifest.clone()));
+        Ok(())
+    }
+
+    fn cached_petshare_manifest(&self) -> Result<Option<Arc<PetshareManifest>>, String> {
+        self.petshare_manifest
+            .lock()
+            .map(|manifest| manifest.clone())
+            .map_err(|_| "Petshare 目录缓存暂时无法读取。".to_string())
+    }
+
+    fn remember_petshare_manifest(&self, manifest: &PetshareManifest) -> Result<(), String> {
+        let mut cached = self
+            .petshare_manifest
+            .lock()
+            .map_err(|_| "Petshare 目录缓存暂时无法更新。".to_string())?;
         *cached = Some(Arc::new(manifest.clone()));
         Ok(())
     }
@@ -87,8 +143,19 @@ pub async fn get_petdex_catalog(
     state: State<'_, LibraryState>,
 ) -> Result<CatalogResponse, String> {
     let (manifest, stale) = load_manifest(&app, &state.client, true).await?;
-    state.remember_manifest(&manifest)?;
+    state.remember_petdex_manifest(&manifest)?;
     catalog_response(manifest, stale)
+}
+
+#[tauri::command]
+pub async fn get_petshare_catalog(
+    app: AppHandle,
+    state: State<'_, LibraryState>,
+) -> Result<CatalogResponse, String> {
+    let (manifest, stale) = load_petshare_manifest(&app, &state.client, true).await?;
+    let response = petshare_catalog_response(manifest.clone(), stale)?;
+    state.remember_petshare_manifest(&manifest)?;
+    Ok(response)
 }
 
 #[tauri::command]
@@ -98,11 +165,11 @@ pub async fn get_petdex_preview(
     slug: String,
 ) -> Result<PetdexPreview, String> {
     validate_slug(&slug)?;
-    let manifest = match state.cached_manifest()? {
+    let manifest = match state.cached_petdex_manifest()? {
         Some(manifest) => manifest,
         None => {
             let (manifest, _) = load_manifest(&app, &state.client, true).await?;
-            state.remember_manifest(&manifest)?;
+            state.remember_petdex_manifest(&manifest)?;
             Arc::new(manifest)
         }
     };
@@ -118,10 +185,47 @@ pub async fn get_petdex_preview(
         .acquire()
         .await
         .map_err(|_| "宠物预览队列暂时不可用。".to_string())?;
-    cache_petdex_preview(
+    cache_pet_preview(
         &app,
         &state.client,
         &state.preview_cache_lock,
+        LibraryProvider::Petdex,
+        &catalog_item,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_petshare_preview(
+    app: AppHandle,
+    state: State<'_, LibraryState>,
+    slug: String,
+) -> Result<PetdexPreview, String> {
+    validate_slug(&slug)?;
+    let manifest = match state.cached_petshare_manifest()? {
+        Some(manifest) => manifest,
+        None => {
+            let (manifest, _) = load_petshare_manifest(&app, &state.client, true).await?;
+            state.remember_petshare_manifest(&manifest)?;
+            Arc::new(manifest)
+        }
+    };
+    let item = manifest
+        .iter()
+        .find(|item| item.id == slug)
+        .cloned()
+        .ok_or_else(|| "Petshare 目录里已经找不到这只宠物，请刷新后再试。".to_string())?;
+    let catalog_item = petshare_item_to_catalog(item)?;
+    let _image_permit = state
+        .image_permits
+        .acquire()
+        .await
+        .map_err(|_| "宠物预览队列暂时不可用。".to_string())?;
+    cache_pet_preview(
+        &app,
+        &state.client,
+        &state.preview_cache_lock,
+        LibraryProvider::Petshare,
         &catalog_item,
     )
     .await
@@ -166,17 +270,15 @@ pub async fn install_petdex_pet(
     slug: String,
 ) -> Result<InstalledPet, String> {
     validate_slug(&slug)?;
-    let root = pets_root(&app)?;
-    let target = root.join(&slug);
-    if target.exists() {
-        return read_installed_pet(&target);
+    if let Some(installed) = existing_installed_pet(&app, LibraryProvider::Petdex, &slug)? {
+        return Ok(installed);
     }
 
-    let manifest = match state.cached_manifest()? {
+    let manifest = match state.cached_petdex_manifest()? {
         Some(manifest) => manifest,
         None => {
             let (manifest, _) = load_manifest(&app, &state.client, true).await?;
-            state.remember_manifest(&manifest)?;
+            state.remember_petdex_manifest(&manifest)?;
             Arc::new(manifest)
         }
     };
@@ -188,17 +290,80 @@ pub async fn install_petdex_pet(
         .cloned()
         .ok_or_else(|| "目录里已经找不到这只宠物，请刷新后再试。".to_string())?;
     let catalog_item = compact_item_to_catalog(&manifest.asset_base, item)?;
+    install_catalog_pet(
+        &app,
+        &state,
+        LibraryProvider::Petdex,
+        slug,
+        catalog_item,
+        generated_at,
+    )
+    .await
+}
 
+#[tauri::command]
+pub async fn install_petshare_pet(
+    app: AppHandle,
+    state: State<'_, LibraryState>,
+    slug: String,
+) -> Result<InstalledPet, String> {
+    validate_slug(&slug)?;
+    if let Some(installed) = existing_installed_pet(&app, LibraryProvider::Petshare, &slug)? {
+        return Ok(installed);
+    }
+
+    let manifest = match state.cached_petshare_manifest()? {
+        Some(manifest) => manifest,
+        None => {
+            let (manifest, _) = load_petshare_manifest(&app, &state.client, true).await?;
+            state.remember_petshare_manifest(&manifest)?;
+            Arc::new(manifest)
+        }
+    };
+    let item = manifest
+        .iter()
+        .find(|item| item.id == slug)
+        .cloned()
+        .ok_or_else(|| "Petshare 目录里已经找不到这只宠物，请刷新后再试。".to_string())?;
+    let catalog_item = petshare_item_to_catalog(item)?;
+    install_catalog_pet(
+        &app,
+        &state,
+        LibraryProvider::Petshare,
+        slug,
+        catalog_item,
+        String::new(),
+    )
+    .await
+}
+
+async fn install_catalog_pet(
+    app: &AppHandle,
+    state: &LibraryState,
+    provider: LibraryProvider,
+    slug: String,
+    catalog_item: CatalogItem,
+    manifest_generated_at: String,
+) -> Result<InstalledPet, String> {
+    if let Some(installed) = existing_installed_pet(app, provider, &slug)? {
+        return Ok(installed);
+    }
     let pet_json_bytes = download_limited(
         &state.client,
         &catalog_item.pet_json_url,
         MAX_PET_JSON_BYTES,
         "宠物清单",
+        provider,
     )
     .await?;
     let mut pet_manifest: PetManifest = serde_json::from_slice(&pet_json_bytes)
         .map_err(|error| format!("宠物清单不是有效 JSON：{error}"))?;
-    validate_pet_manifest(&pet_manifest)?;
+    match provider {
+        LibraryProvider::Petdex => validate_pet_manifest(&pet_manifest)?,
+        LibraryProvider::Petshare => {
+            validate_petshare_pet_manifest(&slug, &pet_manifest, &catalog_item)?
+        }
+    }
 
     let _image_permit = state
         .image_permits
@@ -206,26 +371,28 @@ pub async fn install_petdex_pet(
         .await
         .map_err(|_| "宠物图集检查队列暂时不可用。".to_string())?;
     let (spritesheet_bytes, preview_record) =
-        read_preview_for_install(&app, &state.preview_cache_lock, &catalog_item).await?;
+        read_preview_for_install(app, &state.preview_cache_lock, provider, &catalog_item).await?;
     validate_spritesheet(&spritesheet_bytes, &pet_manifest)?;
 
     let sha256 = preview_record.sha256;
     let installed_at_epoch_seconds = now_epoch_seconds()?;
     let installation = InstallationRecord {
-        source: "petdex".to_string(),
+        source: provider.id().to_string(),
         remote_id: slug.clone(),
         submitted_by: catalog_item.submitted_by.clone(),
         source_page_url: catalog_item.source_page_url.clone(),
-        manifest_generated_at: generated_at,
+        manifest_generated_at,
         installed_at_epoch_seconds,
         sha256,
     };
 
+    let root = pets_root(app)?;
+    let target = root.join(source_scoped_key(provider.id(), &slug));
     fs::create_dir_all(root.join(".staging"))
         .map_err(|error| format!("无法创建宠物库暂存目录：{error}"))?;
     let staging = root.join(".staging").join(format!(
         "{}-{}-{}",
-        slug,
+        source_scoped_key(provider.id(), &slug),
         std::process::id(),
         installed_at_epoch_seconds
     ));
@@ -245,12 +412,14 @@ pub async fn install_petdex_pet(
     if let Err(error) = fs::rename(&staging, &target) {
         let _ = fs::remove_dir_all(&staging);
         if target.exists() {
-            return read_installed_pet(&target);
+            let installed = read_installed_pet(&target)?;
+            return validate_installed_identity(installed, provider, &slug);
         }
         return Err(format!("无法把宠物收进本地库：{error}"));
     }
 
-    read_installed_pet(&target)
+    let installed = read_installed_pet(&target)?;
+    validate_installed_identity(installed, provider, &slug)
 }
 
 async fn load_manifest(
@@ -258,15 +427,18 @@ async fn load_manifest(
     client: &Client,
     allow_cache: bool,
 ) -> Result<(CompactManifest, bool), String> {
-    let cache_path = manifest_cache_path(app)?;
+    let cache_path = manifest_cache_path(app, MANIFEST_CACHE_FILE)?;
     let live_result = async {
-        let bytes =
-            download_limited(client, MANIFEST_URL, MAX_MANIFEST_BYTES, "Petdex 目录").await?;
+        let bytes = download_limited(
+            client,
+            MANIFEST_URL,
+            MAX_MANIFEST_BYTES,
+            "Petdex 目录",
+            LibraryProvider::Petdex,
+        )
+        .await?;
         let manifest = parse_manifest(&bytes)?;
-        if let Some(parent) = cache_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| format!("无法创建目录缓存：{error}"))?;
-        }
-        fs::write(&cache_path, &bytes).map_err(|error| format!("无法保存目录缓存：{error}"))?;
+        persist_catalog_cache(&cache_path, &bytes, "Petdex");
         Ok::<CompactManifest, String>(manifest)
     }
     .await;
@@ -282,6 +454,86 @@ async fn load_manifest(
         }
         Err(error) => Err(error),
     }
+}
+
+async fn load_petshare_manifest(
+    app: &AppHandle,
+    client: &Client,
+    allow_cache: bool,
+) -> Result<(PetshareManifest, bool), String> {
+    let cache_path = manifest_cache_path(app, PETSHARE_MANIFEST_CACHE_FILE)?;
+    let live_result = async {
+        let bytes = download_limited(
+            client,
+            PETSHARE_MANIFEST_URL,
+            MAX_PETSHARE_MANIFEST_BYTES,
+            "Petshare 目录",
+            LibraryProvider::Petshare,
+        )
+        .await?;
+        let manifest = parse_petshare_manifest(&bytes)?;
+        petshare_catalog_response(manifest.clone(), false)?;
+        persist_catalog_cache(&cache_path, &bytes, "Petshare");
+        Ok::<PetshareManifest, String>(manifest)
+    }
+    .await;
+
+    match live_result {
+        Ok(manifest) => Ok((manifest, false)),
+        Err(live_error) if allow_cache => {
+            let bytes = fs::read(&cache_path)
+                .map_err(|_| format!("暂时连不上 Petshare，且本机还没有目录缓存。{live_error}"))?;
+            let manifest = parse_petshare_manifest(&bytes)
+                .map_err(|cache_error| format!("Petshare 目录和本地缓存都不可用：{cache_error}"))?;
+            petshare_catalog_response(manifest.clone(), true)
+                .map_err(|cache_error| format!("Petshare 目录和本地缓存都不可用：{cache_error}"))?;
+            Ok((manifest, true))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn persist_catalog_cache(cache_path: &Path, bytes: &[u8], source: &str) {
+    if let Err(error) = write_catalog_cache(cache_path, bytes) {
+        eprintln!("failed to update the {source} catalog cache: {error}");
+    }
+}
+
+fn write_catalog_cache(cache_path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = cache_path
+        .parent()
+        .ok_or_else(|| "目录缓存路径无效。".to_string())?;
+    let file_name = cache_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "目录缓存文件名无效。".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("无法创建目录缓存：{error}"))?;
+
+    let nonce = now_epoch_nanos()?;
+    let temporary = parent.join(format!(".{file_name}-{}-{nonce}.tmp", std::process::id()));
+    let backup = parent.join(format!(".{file_name}-{}-{nonce}.bak", std::process::id()));
+    fs::write(&temporary, bytes).map_err(|error| format!("无法暂存目录缓存：{error}"))?;
+
+    if fs::rename(&temporary, cache_path).is_ok() {
+        return Ok(());
+    }
+
+    if cache_path.exists() && fs::rename(cache_path, &backup).is_ok() {
+        match fs::rename(&temporary, cache_path) {
+            Ok(()) => {
+                let _ = fs::remove_file(&backup);
+                return Ok(());
+            }
+            Err(error) => {
+                let _ = fs::rename(&backup, cache_path);
+                let _ = fs::remove_file(&temporary);
+                return Err(format!("无法替换目录缓存：{error}"));
+            }
+        }
+    }
+
+    let _ = fs::remove_file(&temporary);
+    Err("无法替换目录缓存。".to_string())
 }
 
 fn parse_manifest(bytes: &[u8]) -> Result<CompactManifest, String> {
@@ -337,10 +589,73 @@ fn compact_item_to_catalog(
         source_page_url: format!("https://petdex.dev/pets/{slug}"),
         slug,
         display_name,
+        description: None,
         kind,
         submitted_by,
         spritesheet_url,
         pet_json_url,
+    })
+}
+
+fn parse_petshare_manifest(bytes: &[u8]) -> Result<PetshareManifest, String> {
+    if bytes.len() > MAX_PETSHARE_MANIFEST_BYTES {
+        return Err("Petshare 目录超过安全大小限制。".to_string());
+    }
+    serde_json::from_slice(bytes).map_err(|error| format!("Petshare 目录格式无法识别：{error}"))
+}
+
+fn petshare_catalog_response(
+    manifest: PetshareManifest,
+    stale: bool,
+) -> Result<CatalogResponse, String> {
+    let mut ids = HashSet::with_capacity(manifest.len());
+    for item in &manifest {
+        if !ids.insert(item.id.as_str()) {
+            return Err(format!("Petshare 目录包含重复 id：{}。", item.id));
+        }
+    }
+    let items = manifest
+        .into_iter()
+        .map(petshare_item_to_catalog)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CatalogResponse {
+        generated_at: String::new(),
+        total: items.len(),
+        stale,
+        items,
+    })
+}
+
+fn petshare_item_to_catalog(item: PetshareCatalogEntry) -> Result<CatalogItem, String> {
+    validate_slug(&item.id)?;
+    if item.display_name.trim().is_empty() || item.display_name.chars().count() > 120 {
+        return Err(format!("Petshare 目录条目 {} 的名称无效。", item.id));
+    }
+    if item.description.chars().count() > 1_000 {
+        return Err(format!("Petshare 目录条目 {} 的描述过长。", item.id));
+    }
+    if item.sprite_version_number != 2 {
+        return Err(format!("Petshare 目录条目 {} 不是 Pet V2。", item.id));
+    }
+    let expected_spritesheet = format!("/pets/{}/spritesheet.webp", item.id);
+    let expected_manifest = format!("/pets/{}/pet.json", item.id);
+    let expected_download = format!("/downloads/{}.zip", item.id);
+    if item.spritesheet_path != expected_spritesheet
+        || item.manifest_path != expected_manifest
+        || item.download_path != expected_download
+    {
+        return Err(format!("Petshare 目录条目 {} 的素材路径无效。", item.id));
+    }
+
+    Ok(CatalogItem {
+        slug: item.id,
+        display_name: item.display_name,
+        description: Some(item.description),
+        kind: "character".to_string(),
+        submitted_by: None,
+        spritesheet_url: format!("{PETSHARE_BASE}{expected_spritesheet}"),
+        pet_json_url: format!("{PETSHARE_BASE}{expected_manifest}"),
+        source_page_url: format!("{PETSHARE_BASE}/"),
     })
 }
 
@@ -376,16 +691,33 @@ fn validate_asset_url(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_petshare_asset_url(raw: &str) -> Result<(), String> {
+    let parsed =
+        reqwest::Url::parse(raw).map_err(|_| "Petshare 素材 URL 无法识别。".to_string())?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some(PETSHARE_HOST)
+        || parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("Petshare 素材 URL 不在 PetX 的受信范围内。".to_string());
+    }
+    Ok(())
+}
+
 async fn download_limited(
     client: &Client,
     url: &str,
     maximum_bytes: usize,
     label: &str,
+    provider: LibraryProvider,
 ) -> Result<Vec<u8>, String> {
-    validate_asset_url(url)?;
+    provider.validate_url(url)?;
     let mut response = client
         .get(url)
-        .header(header::REFERER, "https://petdex.dev/")
+        .header(header::REFERER, provider.referer())
         .send()
         .await
         .map_err(|error| format!("{label}下载失败：{error}"))?;
@@ -416,19 +748,20 @@ async fn download_limited(
     Ok(bytes)
 }
 
-async fn cache_petdex_preview(
+async fn cache_pet_preview(
     app: &AppHandle,
     client: &Client,
     cache_lock: &AsyncMutex<()>,
+    provider: LibraryProvider,
     item: &CatalogItem,
 ) -> Result<PetdexPreview, String> {
-    let (extension, format) = spritesheet_format(&item.spritesheet_url)?;
+    let (extension, format) = spritesheet_format_for(provider, &item.spritesheet_url)?;
     let root = preview_cache_root(app)?;
-    let target = root.join(&item.slug);
+    let target = root.join(source_scoped_key(provider.id(), &item.slug));
 
     {
         let _cache_guard = cache_lock.lock().await;
-        if let Some((preview, _)) = cached_preview(&target, extension, item) {
+        if let Some((preview, _)) = cached_preview(provider, &target, extension, item) {
             touch_preview_cache(&target);
             return Ok(preview);
         }
@@ -439,9 +772,11 @@ async fn cache_petdex_preview(
         &item.spritesheet_url,
         MAX_SPRITESHEET_BYTES,
         "宠物预览",
+        provider,
     )
     .await?;
     let (thumbnail, sprite_version_number) = make_preview_thumbnail(&bytes, format)?;
+    validate_preview_version(provider, sprite_version_number)?;
     let record = PreviewRecord {
         spritesheet_url: item.spritesheet_url.clone(),
         sprite_version_number,
@@ -452,7 +787,7 @@ async fn cache_petdex_preview(
     let incoming_bytes = (bytes.len() + thumbnail.len() + record_json.len() + 64) as u64;
 
     let _cache_guard = cache_lock.lock().await;
-    if let Some((preview, _)) = cached_preview(&target, extension, item) {
+    if let Some((preview, _)) = cached_preview(provider, &target, extension, item) {
         touch_preview_cache(&target);
         return Ok(preview);
     }
@@ -496,7 +831,7 @@ async fn cache_petdex_preview(
 
     if let Err(error) = fs::rename(&staging, &target) {
         let _ = fs::remove_dir_all(&staging);
-        if let Some((preview, _)) = cached_preview(&target, extension, item) {
+        if let Some((preview, _)) = cached_preview(provider, &target, extension, item) {
             touch_preview_cache(&target);
             return Ok(preview);
         }
@@ -509,13 +844,14 @@ async fn cache_petdex_preview(
 async fn read_preview_for_install(
     app: &AppHandle,
     cache_lock: &AsyncMutex<()>,
+    provider: LibraryProvider,
     item: &CatalogItem,
 ) -> Result<(Vec<u8>, PreviewRecord), String> {
-    let (extension, _) = spritesheet_format(&item.spritesheet_url)?;
+    let (extension, _) = spritesheet_format_for(provider, &item.spritesheet_url)?;
     let root = preview_cache_root(app)?;
-    let target = root.join(&item.slug);
+    let target = root.join(source_scoped_key(provider.id(), &item.slug));
     let _cache_guard = cache_lock.lock().await;
-    let (preview, record) = cached_preview(&target, extension, item)
+    let (preview, record) = cached_preview(provider, &target, extension, item)
         .ok_or_else(|| "预览还没有准备好，请等伙伴形象出现后再收藏。".to_string())?;
     let sprite_path = PathBuf::from(&preview.sprite_path);
     let bytes =
@@ -529,8 +865,11 @@ async fn read_preview_for_install(
     Ok((bytes, record))
 }
 
-fn spritesheet_format(url: &str) -> Result<(&'static str, image::ImageFormat), String> {
-    validate_asset_url(url)?;
+fn spritesheet_format_for(
+    provider: LibraryProvider,
+    url: &str,
+) -> Result<(&'static str, image::ImageFormat), String> {
+    provider.validate_url(url)?;
     let path = reqwest::Url::parse(url)
         .map_err(|_| "宠物预览地址无法识别。".to_string())?
         .path()
@@ -568,7 +907,18 @@ fn make_preview_thumbnail(
     Ok((output.into_inner(), sprite_version_number))
 }
 
+fn validate_preview_version(
+    provider: LibraryProvider,
+    sprite_version_number: u8,
+) -> Result<(), String> {
+    if matches!(provider, LibraryProvider::Petshare) && sprite_version_number != 2 {
+        return Err("Petshare 预览不是 V2 宠物图集。".to_string());
+    }
+    Ok(())
+}
+
 fn cached_preview(
+    provider: LibraryProvider,
     target: &Path,
     extension: &str,
     item: &CatalogItem,
@@ -580,6 +930,7 @@ fn cached_preview(
     if record.spritesheet_url != item.spritesheet_url
         || !matches!(record.sprite_version_number, 1 | 2)
         || record.sha256.len() != 64
+        || validate_preview_version(provider, record.sprite_version_number).is_err()
     {
         return None;
     }
@@ -698,6 +1049,27 @@ fn validate_pet_manifest(manifest: &PetManifest) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_petshare_pet_manifest(
+    slug: &str,
+    manifest: &PetManifest,
+    catalog_item: &CatalogItem,
+) -> Result<(), String> {
+    validate_pet_manifest(manifest)?;
+    if manifest.id != slug {
+        return Err("Petshare 宠物清单与目录 id 不一致。".to_string());
+    }
+    if manifest.display_name != catalog_item.display_name
+        || manifest.description != catalog_item.description
+    {
+        return Err("Petshare 宠物清单与目录展示信息不一致。".to_string());
+    }
+    if manifest.sprite_version_number != Some(2) || manifest.spritesheet_path != "spritesheet.webp"
+    {
+        return Err("Petshare 只支持 V2 WebP 宠物图集。".to_string());
+    }
+    Ok(())
+}
+
 fn validate_spritesheet(bytes: &[u8], manifest: &PetManifest) -> Result<(), String> {
     let format = match manifest.spritesheet_path.as_str() {
         "spritesheet.webp" => image::ImageFormat::WebP,
@@ -759,6 +1131,43 @@ fn write_staged_pet(
     Ok(())
 }
 
+fn existing_installed_pet(
+    app: &AppHandle,
+    provider: LibraryProvider,
+    slug: &str,
+) -> Result<Option<InstalledPet>, String> {
+    let root = pets_root(app)?;
+    let target = root.join(source_scoped_key(provider.id(), slug));
+    if target.exists() {
+        let installed = read_installed_pet(&target)?;
+        return validate_installed_identity(installed, provider, slug).map(Some);
+    }
+
+    if matches!(provider, LibraryProvider::Petdex) {
+        let legacy_target = root.join(slug);
+        if legacy_target.exists() {
+            if let Ok(installed) = read_installed_pet(&legacy_target) {
+                if installed.source == provider.id() && installed.slug == slug {
+                    return Ok(Some(installed));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn validate_installed_identity(
+    installed: InstalledPet,
+    provider: LibraryProvider,
+    slug: &str,
+) -> Result<InstalledPet, String> {
+    if installed.source != provider.id() || installed.slug != slug {
+        return Err("本地宠物来源记录与安装目录不一致。".to_string());
+    }
+    Ok(installed)
+}
+
 fn read_installed_pet(directory: &Path) -> Result<InstalledPet, String> {
     let manifest_path = directory.join("pet.json");
     let installation_path = directory.join("installation.json");
@@ -778,6 +1187,7 @@ fn read_installed_pet(directory: &Path) -> Result<InstalledPet, String> {
         return Err("本地宠物图集已经丢失。".to_string());
     }
     Ok(InstalledPet {
+        source: installation.source,
         slug: installation.remote_id,
         display_name: manifest.display_name,
         description: manifest.description,
@@ -797,10 +1207,10 @@ fn pets_root(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("无法定位 PetX 本地宠物库：{error}"))
 }
 
-fn manifest_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn manifest_cache_path(app: &AppHandle, cache_file: &str) -> Result<PathBuf, String> {
     app.path()
         .app_cache_dir()
-        .map(|path| path.join(MANIFEST_CACHE_FILE))
+        .map(|path| path.join(cache_file))
         .map_err(|error| format!("无法定位 PetX 目录缓存：{error}"))
 }
 
@@ -837,6 +1247,10 @@ fn validate_slug(slug: &str) -> Result<(), String> {
         return Err("宠物目录 id 不是安全的 slug。".to_string());
     }
     Ok(())
+}
+
+fn source_scoped_key(source: &str, slug: &str) -> String {
+    format!("{source}--{slug}")
 }
 
 #[cfg(test)]
@@ -880,18 +1294,28 @@ mod tests {
     #[test]
     fn accepts_only_supported_preview_extensions() {
         assert_eq!(
-            spritesheet_format("https://assets.petdex.dev/pets/example/sprite.webp")
-                .unwrap()
-                .0,
+            spritesheet_format_for(
+                LibraryProvider::Petdex,
+                "https://assets.petdex.dev/pets/example/sprite.webp"
+            )
+            .unwrap()
+            .0,
             "webp"
         );
         assert_eq!(
-            spritesheet_format("https://assets.petdex.dev/pets/example/sprite.png")
-                .unwrap()
-                .0,
+            spritesheet_format_for(
+                LibraryProvider::Petdex,
+                "https://assets.petdex.dev/pets/example/sprite.png"
+            )
+            .unwrap()
+            .0,
             "png"
         );
-        assert!(spritesheet_format("https://assets.petdex.dev/pets/example/sprite.svg").is_err());
+        assert!(spritesheet_format_for(
+            LibraryProvider::Petdex,
+            "https://assets.petdex.dev/pets/example/sprite.svg"
+        )
+        .is_err());
     }
 
     #[test]
@@ -954,6 +1378,7 @@ mod tests {
         let mut item = CatalogItem {
             slug: "example".to_string(),
             display_name: "Example".to_string(),
+            description: None,
             kind: "character".to_string(),
             submitted_by: None,
             spritesheet_url: original_url.to_string(),
@@ -961,9 +1386,252 @@ mod tests {
             source_page_url: "https://petdex.dev/pets/example".to_string(),
         };
 
-        assert!(cached_preview(&target, "webp", &item).is_some());
+        assert!(cached_preview(LibraryProvider::Petdex, &target, "webp", &item).is_some());
         item.spritesheet_url = "https://assets.petdex.dev/pets/example/new-sprite.webp".to_string();
-        assert!(cached_preview(&target, "webp", &item).is_none());
+        assert!(cached_preview(LibraryProvider::Petdex, &target, "webp", &item).is_none());
         fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
+    fn petshare_preview_cache_rejects_legacy_sprite_geometry() {
+        let target = std::env::temp_dir().join(format!(
+            "petx-petshare-preview-version-{}-{}",
+            std::process::id(),
+            now_epoch_nanos().unwrap()
+        ));
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("spritesheet.webp"), [1_u8]).unwrap();
+        fs::write(target.join("thumbnail.png"), [1_u8]).unwrap();
+        let spritesheet_url =
+            "https://petshare.idevlab.dev/pets/example/spritesheet.webp".to_string();
+        let record = PreviewRecord {
+            spritesheet_url: spritesheet_url.clone(),
+            sprite_version_number: 1,
+            sha256: "a".repeat(64),
+        };
+        fs::write(
+            target.join("preview.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        let item = CatalogItem {
+            slug: "example".to_string(),
+            display_name: "Example".to_string(),
+            description: None,
+            kind: "character".to_string(),
+            submitted_by: None,
+            spritesheet_url,
+            pet_json_url: "https://petshare.idevlab.dev/pets/example/pet.json".to_string(),
+            source_page_url: "https://petshare.idevlab.dev/".to_string(),
+        };
+
+        assert!(
+            cached_preview(LibraryProvider::Petshare, &target, "webp", &item).is_none(),
+            "Petshare must never reuse a legacy V1 preview cache"
+        );
+        fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
+    fn petshare_catalog_maps_public_entries_to_trusted_assets() {
+        let bytes = br#"[
+          {
+            "id": "bill-gates",
+            "displayName": "Bill Gates",
+            "description": "A tiny coding companion.",
+            "spriteVersionNumber": 2,
+            "spritesheetPath": "/pets/bill-gates/spritesheet.webp",
+            "manifestPath": "/pets/bill-gates/pet.json",
+            "downloadPath": "/downloads/bill-gates.zip"
+          }
+        ]"#;
+
+        let response = petshare_catalog_response(parse_petshare_manifest(bytes).unwrap(), false)
+            .expect("valid Petshare entries should map to the public catalog");
+
+        assert_eq!(response.total, 1);
+        assert!(!response.stale);
+        assert_eq!(response.items[0].slug, "bill-gates");
+        assert_eq!(response.items[0].display_name, "Bill Gates");
+        assert_eq!(response.items[0].kind, "character");
+        assert_eq!(
+            response.items[0].spritesheet_url,
+            "https://petshare.idevlab.dev/pets/bill-gates/spritesheet.webp"
+        );
+        assert_eq!(
+            response.items[0].pet_json_url,
+            "https://petshare.idevlab.dev/pets/bill-gates/pet.json"
+        );
+    }
+
+    #[test]
+    fn petshare_catalog_rejects_duplicate_ids() {
+        let bytes = br#"[
+          {
+            "id": "same-pet",
+            "displayName": "First",
+            "description": "First entry.",
+            "spriteVersionNumber": 2,
+            "spritesheetPath": "/pets/same-pet/spritesheet.webp",
+            "manifestPath": "/pets/same-pet/pet.json",
+            "downloadPath": "/downloads/same-pet.zip"
+          },
+          {
+            "id": "same-pet",
+            "displayName": "Second",
+            "description": "Second entry.",
+            "spriteVersionNumber": 2,
+            "spritesheetPath": "/pets/same-pet/spritesheet.webp",
+            "manifestPath": "/pets/same-pet/pet.json",
+            "downloadPath": "/downloads/same-pet.zip"
+          }
+        ]"#;
+
+        let result = petshare_catalog_response(parse_petshare_manifest(bytes).unwrap(), false);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn petshare_catalog_tolerates_future_metadata_fields() {
+        let bytes = br#"[
+          {
+            "id": "future-pet",
+            "displayName": "Future Pet",
+            "description": "Still compatible when the source adds metadata.",
+            "spriteVersionNumber": 2,
+            "spritesheetPath": "/pets/future-pet/spritesheet.webp",
+            "manifestPath": "/pets/future-pet/pet.json",
+            "downloadPath": "/downloads/future-pet.zip",
+            "license": "CC-BY-4.0"
+          }
+        ]"#;
+
+        let response = petshare_catalog_response(parse_petshare_manifest(bytes).unwrap(), false)
+            .expect("unrelated future fields should not break the catalog");
+
+        assert_eq!(response.items[0].slug, "future-pet");
+    }
+
+    #[test]
+    fn petshare_assets_require_the_exact_public_origin() {
+        assert!(validate_petshare_asset_url(
+            "https://petshare.idevlab.dev/pets/example/spritesheet.webp"
+        )
+        .is_ok());
+        for url in [
+            "http://petshare.idevlab.dev/pets/example/spritesheet.webp",
+            "https://evil.example/pets/example/spritesheet.webp",
+            "https://petshare.idevlab.dev.evil.example/pets/example/spritesheet.webp",
+            "https://petshare.idevlab.dev:444/pets/example/spritesheet.webp",
+            "https://user@petshare.idevlab.dev/pets/example/spritesheet.webp",
+            "https://petshare.idevlab.dev/pets/example/spritesheet.webp?raw=1",
+        ] {
+            assert!(
+                validate_petshare_asset_url(url).is_err(),
+                "{url} should fail"
+            );
+        }
+    }
+
+    #[test]
+    fn storage_keys_keep_same_slug_sources_separate() {
+        assert_eq!(source_scoped_key("petdex", "same-pet"), "petdex--same-pet");
+        assert_eq!(
+            source_scoped_key("petshare", "same-pet"),
+            "petshare--same-pet"
+        );
+        assert_ne!(
+            source_scoped_key("petdex", "same-pet"),
+            source_scoped_key("petshare", "same-pet")
+        );
+    }
+
+    #[test]
+    fn catalog_cache_replacement_never_exposes_a_partial_write() {
+        let root = std::env::temp_dir().join(format!(
+            "petx-catalog-cache-{}-{}",
+            std::process::id(),
+            now_epoch_nanos().unwrap()
+        ));
+        let cache = root.join("catalog.json");
+
+        write_catalog_cache(&cache, br#"{"version":1}"#).unwrap();
+        write_catalog_cache(&cache, br#"{"version":2}"#).unwrap();
+
+        assert_eq!(fs::read(&cache).unwrap(), br#"{"version":2}"#);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installed_pet_serializes_its_source() {
+        let installed = InstalledPet {
+            source: "petshare".to_string(),
+            slug: "same-pet".to_string(),
+            display_name: "Same Pet".to_string(),
+            description: None,
+            submitted_by: None,
+            sprite_path: "/tmp/same-pet/spritesheet.webp".to_string(),
+            source_page_url: "https://petshare.idevlab.dev/".to_string(),
+            sprite_version_number: 2,
+            installed_at_epoch_seconds: 1,
+            sha256: "a".repeat(64),
+        };
+
+        let json = serde_json::to_value(installed).unwrap();
+
+        assert_eq!(json["source"], "petshare");
+        assert_eq!(json["slug"], "same-pet");
+    }
+
+    #[test]
+    fn petshare_install_manifest_must_match_the_catalog_identity() {
+        let catalog_item = CatalogItem {
+            slug: "same-pet".to_string(),
+            display_name: "Same Pet".to_string(),
+            description: Some("Same description.".to_string()),
+            kind: "character".to_string(),
+            submitted_by: None,
+            spritesheet_url: "https://petshare.idevlab.dev/pets/same-pet/spritesheet.webp"
+                .to_string(),
+            pet_json_url: "https://petshare.idevlab.dev/pets/same-pet/pet.json".to_string(),
+            source_page_url: "https://petshare.idevlab.dev/".to_string(),
+        };
+        let valid = PetManifest {
+            id: "same-pet".to_string(),
+            display_name: "Same Pet".to_string(),
+            description: Some("Same description.".to_string()),
+            sprite_version_number: Some(2),
+            spritesheet_path: "spritesheet.webp".to_string(),
+        };
+        assert!(validate_petshare_pet_manifest("same-pet", &valid, &catalog_item).is_ok());
+
+        let mut mismatched = valid.clone();
+        mismatched.id = "another-pet".to_string();
+        assert!(validate_petshare_pet_manifest("same-pet", &mismatched, &catalog_item).is_err());
+
+        let mut renamed = valid.clone();
+        renamed.display_name = "Another Pet".to_string();
+        assert!(validate_petshare_pet_manifest("same-pet", &renamed, &catalog_item).is_err());
+
+        let mut redescribed = valid.clone();
+        redescribed.description = Some("Another description.".to_string());
+        assert!(validate_petshare_pet_manifest("same-pet", &redescribed, &catalog_item).is_err());
+
+        let mut legacy = valid.clone();
+        legacy.sprite_version_number = Some(1);
+        assert!(validate_petshare_pet_manifest("same-pet", &legacy, &catalog_item).is_err());
+
+        let mut png = valid;
+        png.spritesheet_path = "spritesheet.png".to_string();
+        assert!(validate_petshare_pet_manifest("same-pet", &png, &catalog_item).is_err());
+    }
+
+    #[test]
+    fn petshare_preview_rejects_legacy_sprite_geometry() {
+        assert!(validate_preview_version(LibraryProvider::Petshare, 2).is_ok());
+        assert!(validate_preview_version(LibraryProvider::Petshare, 1).is_err());
+        assert!(validate_preview_version(LibraryProvider::Petdex, 1).is_ok());
+        assert!(validate_preview_version(LibraryProvider::Petdex, 2).is_ok());
     }
 }

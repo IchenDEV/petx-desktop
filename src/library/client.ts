@@ -4,11 +4,14 @@ import { isTauri } from '../platform';
 import type {
   CatalogItem,
   CatalogResponse,
+  DirectLibrarySourceId,
   InstalledPet,
 } from './model';
 
 const PREVIEW_MANIFEST_URL = '/__petdex/manifest';
+const PETSHARE_PREVIEW_MANIFEST_URL = '/__petshare/catalog';
 const PETDEX_ASSET_BASE = 'https://assets.petdex.dev';
+const PETSHARE_ASSET_BASE = 'https://petshare.idevlab.dev';
 const previewRequests = new Map<string, Promise<ResolvedPetPreview>>();
 
 interface CachedPetdexPreview {
@@ -36,6 +39,24 @@ export async function fetchPetdexCatalog(): Promise<CatalogResponse> {
   return parseCompactManifest(await response.json());
 }
 
+export async function fetchPetshareCatalog(): Promise<CatalogResponse> {
+  if (isTauri) return invoke<CatalogResponse>('get_petshare_catalog');
+
+  const response = await fetch(PETSHARE_PREVIEW_MANIFEST_URL);
+  if (!response.ok) {
+    throw new Error(`PetShare 预览目录请求失败（HTTP ${response.status}）。`);
+  }
+  return parsePetshareManifest(await response.json());
+}
+
+export function fetchCatalog(
+  source: DirectLibrarySourceId,
+): Promise<CatalogResponse> {
+  return source === 'petdex'
+    ? fetchPetdexCatalog()
+    : fetchPetshareCatalog();
+}
+
 export async function fetchInstalledPets(): Promise<InstalledPet[]> {
   if (!isTauri) return [];
   return invoke<InstalledPet[]>('list_installed_pets');
@@ -48,23 +69,53 @@ export async function installPetdexPet(slug: string): Promise<InstalledPet> {
   return invoke<InstalledPet>('install_petdex_pet', { slug });
 }
 
+export async function installPetsharePet(
+  slug: string,
+): Promise<InstalledPet> {
+  if (!isTauri) {
+    throw new Error('请在 PetX 桌面版里把伙伴收进本地宠物库。');
+  }
+  return invoke<InstalledPet>('install_petshare_pet', { slug });
+}
+
+export function installCatalogPet(
+  source: DirectLibrarySourceId,
+  slug: string,
+): Promise<InstalledPet> {
+  return source === 'petdex'
+    ? installPetdexPet(slug)
+    : installPetsharePet(slug);
+}
+
 export function fetchPetdexPreview(
   slug: string,
   spritesheetUrl: string,
   petJsonUrl: string,
 ): Promise<ResolvedPetPreview> {
-  const cacheKey = `${slug}|${spritesheetUrl}|${petJsonUrl}`;
-  const existing = previewRequests.get(cacheKey);
-  if (existing) return existing;
-
-  const request = resolvePetdexPreview(
+  return fetchCatalogPreview(
+    'petdex',
     slug,
     spritesheetUrl,
     petJsonUrl,
-  ).catch((error) => {
-    previewRequests.delete(cacheKey);
-    throw error;
-  });
+  );
+}
+
+export function fetchCatalogPreview(
+  source: DirectLibrarySourceId,
+  slug: string,
+  spritesheetUrl: string,
+  petJsonUrl: string,
+): Promise<ResolvedPetPreview> {
+  const cacheKey = `${source}|${slug}|${spritesheetUrl}|${petJsonUrl}`;
+  const existing = previewRequests.get(cacheKey);
+  if (existing) return existing;
+
+  const request = resolveCatalogPreview(
+    source,
+    slug,
+    spritesheetUrl,
+    petJsonUrl,
+  ).finally(() => previewRequests.delete(cacheKey));
   previewRequests.set(cacheKey, request);
   return request;
 }
@@ -81,15 +132,16 @@ export async function openExternalPage(url: string): Promise<void> {
   window.open(url, '_blank', 'noopener,noreferrer');
 }
 
-async function resolvePetdexPreview(
+async function resolveCatalogPreview(
+  source: DirectLibrarySourceId,
   slug: string,
   spritesheetUrl: string,
   petJsonUrl: string,
 ): Promise<ResolvedPetPreview> {
   if (isTauri) {
-    const cached = await invoke<CachedPetdexPreview>('get_petdex_preview', {
-      slug,
-    });
+    const command =
+      source === 'petdex' ? 'get_petdex_preview' : 'get_petshare_preview';
+    const cached = await invoke<CachedPetdexPreview>(command, { slug });
     return {
       spriteUrl: convertFileSrc(cached.spritePath),
       thumbnailUrl: convertFileSrc(cached.thumbnailPath),
@@ -99,11 +151,21 @@ async function resolvePetdexPreview(
     };
   }
 
-  const trustedUrl = new URL(resolvePetdexAsset(spritesheetUrl));
-  const trustedManifestUrl = new URL(resolvePetdexAsset(petJsonUrl));
-  const proxiedUrl = `/__petdex/assets${trustedUrl.pathname}`;
+  const trustedUrl = new URL(
+    source === 'petdex'
+      ? resolvePetdexAsset(spritesheetUrl)
+      : resolvePetshareAsset(slug, spritesheetUrl, 'spritesheet.webp'),
+  );
+  const trustedManifestUrl = new URL(
+    source === 'petdex'
+      ? resolvePetdexAsset(petJsonUrl)
+      : resolvePetshareAsset(slug, petJsonUrl, 'pet.json'),
+  );
+  const proxyBase =
+    source === 'petdex' ? '/__petdex/assets' : '/__petshare/assets';
+  const proxiedUrl = `${proxyBase}${trustedUrl.pathname}`;
   const manifestResponse = await fetch(
-    `/__petdex/assets${trustedManifestUrl.pathname}`,
+    `${proxyBase}${trustedManifestUrl.pathname}`,
   );
   if (!manifestResponse.ok) {
     throw new Error(`宠物预览清单请求失败（HTTP ${manifestResponse.status}）。`);
@@ -161,11 +223,72 @@ function parseCompactItem(value: unknown): CatalogItem {
   return {
     slug,
     displayName: value[1],
+    description: null,
     kind: value[2],
     submittedBy: value[3],
     spritesheetUrl: resolvePetdexAsset(value[4]),
     petJsonUrl: resolvePetdexAsset(value[5]),
     sourcePageUrl: `https://petdex.dev/pets/${encodeURIComponent(slug)}`,
+  };
+}
+
+function parsePetshareManifest(value: unknown): CatalogResponse {
+  if (!Array.isArray(value)) {
+    throw new Error('PetShare 预览目录格式无法识别。');
+  }
+  const seen = new Set<string>();
+  const items = value.map((entry) => parsePetshareItem(entry, seen));
+  return {
+    generatedAt: '',
+    total: items.length,
+    stale: false,
+    items,
+  };
+}
+
+function parsePetshareItem(
+  value: unknown,
+  seen: Set<string>,
+): CatalogItem {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== 'string' ||
+    typeof value.displayName !== 'string' ||
+    typeof value.description !== 'string' ||
+    value.spriteVersionNumber !== 2 ||
+    typeof value.spritesheetPath !== 'string' ||
+    typeof value.manifestPath !== 'string' ||
+    typeof value.downloadPath !== 'string'
+  ) {
+    throw new Error('PetShare 预览目录中有无法识别的条目。');
+  }
+  const slug = value.id;
+  if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(slug) || seen.has(slug)) {
+    throw new Error('PetShare 预览目录包含无效或重复的宠物 id。');
+  }
+  seen.add(slug);
+  const spritesheetUrl = resolvePetshareAsset(
+    slug,
+    value.spritesheetPath,
+    'spritesheet.webp',
+  );
+  const petJsonUrl = resolvePetshareAsset(
+    slug,
+    value.manifestPath,
+    'pet.json',
+  );
+  if (value.downloadPath !== `/downloads/${slug}.zip`) {
+    throw new Error('PetShare 预览目录包含未受信任的下载路径。');
+  }
+  return {
+    slug,
+    displayName: value.displayName,
+    description: value.description,
+    kind: 'character',
+    submittedBy: null,
+    spritesheetUrl,
+    petJsonUrl,
+    sourcePageUrl: `${PETSHARE_ASSET_BASE}/`,
   };
 }
 
@@ -181,6 +304,30 @@ function resolvePetdexAsset(reference: string): string {
     url.hash !== ''
   ) {
     throw new Error('Petdex 预览目录包含未受信任的素材地址。');
+  }
+  return url.href;
+}
+
+function resolvePetshareAsset(
+  slug: string,
+  reference: string,
+  filename: 'pet.json' | 'spritesheet.webp',
+): string {
+  const expectedPath = `/pets/${slug}/${filename}`;
+  const expectedUrl = `${PETSHARE_ASSET_BASE}${expectedPath}`;
+  const url = new URL(reference, `${PETSHARE_ASSET_BASE}/`);
+  if (
+    (reference !== expectedPath && reference !== expectedUrl) ||
+    url.protocol !== 'https:' ||
+    url.hostname !== 'petshare.idevlab.dev' ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.port !== '' ||
+    url.pathname !== expectedPath ||
+    url.search !== '' ||
+    url.hash !== ''
+  ) {
+    throw new Error('PetShare 预览目录包含未受信任的素材地址。');
   }
   return url.href;
 }

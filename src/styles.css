@@ -415,6 +415,171 @@ select:focus-visible {
   pointer-events: none;
 }
 
+.presence-sheet {
+  position: absolute;
+  top: 13px;
+  left: 13px;
+  width: 326px;
+  padding: 14px 15px 13px;
+  border: 2px solid #35443f;
+  border-radius: 8px 5px 9px 6px;
+  background:
+    repeating-linear-gradient(
+      0deg,
+      transparent 0,
+      transparent 23px,
+      rgb(120 105 77 / 6%) 24px
+    ),
+    #f4efe3;
+  box-shadow:
+    inset 0 0 0 3px rgb(201 183 143 / 44%),
+    7px 9px 0 rgb(45 42 36 / 16%);
+  color: var(--ink);
+  z-index: 4;
+  animation: care-sheet-open 170ms ease-out both;
+}
+
+.presence-sheet__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 2px 10px;
+  border-bottom: 1px solid #c9bda6;
+}
+
+.presence-sheet__header p {
+  margin: 0 0 2px;
+  color: var(--gold-dark);
+  font-size: 9px;
+  font-weight: 740;
+  letter-spacing: 0.11em;
+}
+
+.presence-sheet__header h1 {
+  margin: 0;
+  font-family: ui-serif, "Songti SC", "STSong", Georgia, serif;
+  font-size: 18px;
+  font-weight: 680;
+  letter-spacing: 0.035em;
+}
+
+.presence-sheet__header button {
+  min-width: 45px;
+  min-height: 29px;
+  padding: 4px 7px;
+  border: 1px solid #9f947e;
+  border-radius: 3px;
+  background: #ebe3d4;
+  color: #5c574e;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.presence-sheet__signals {
+  margin: 8px 0 0;
+}
+
+.presence-sheet__signals > div {
+  display: grid;
+  min-height: 34px;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.presence-sheet__signals > div + div {
+  border-top: 1px dashed rgb(118 102 70 / 20%);
+}
+
+.presence-sheet__signals dt,
+.presence-sheet__signals dd {
+  margin: 0;
+}
+
+.presence-sheet__signals dt {
+  color: #706755;
+  font-size: 10px;
+  font-weight: 720;
+}
+
+.presence-sheet__signals dd {
+  overflow: hidden;
+  color: #3f413c;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.presence-sheet__status {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 7px 0 0;
+  padding: 6px 8px;
+  border: 1px solid #cabd9f;
+  border-radius: 3px;
+  background: #ece4d3;
+  color: #6c6251;
+  font-size: 9px;
+}
+
+.presence-sheet__status.is-error {
+  border-color: #d0aaa0;
+  background: #f5e6e1;
+  color: #7d4941;
+}
+
+.presence-sheet__status button {
+  padding: 2px 5px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: 720;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.presence-sheet__privacy {
+  margin: 9px 1px 0;
+  color: #696359;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.presence-sheet__actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.presence-sheet__actions button {
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid #8f8167;
+  border-radius: 4px;
+  background: #f9f3e7;
+  color: #45433d;
+  font-size: 10px;
+  font-weight: 680;
+  cursor: pointer;
+}
+
+.presence-sheet__actions button:first-child {
+  border-color: #53776f;
+  background: #5d7e77;
+  color: #fffdf5;
+}
+
+.presence-sheet__actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .memory-journal {
   position: absolute;
   inset: 15px 13px 17px;
@@ -789,6 +954,33 @@ select:focus-visible {
   color: #625f59;
   font-size: 10px;
   line-height: 1.55;
+}
+
+.settings-section-heading {
+  margin-bottom: 5px;
+}
+
+.settings-section-heading h2 {
+  margin: 0;
+  color: #373834;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.settings-section-heading p,
+.settings-privacy-note {
+  margin: 4px 0 0;
+  color: #625f59;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.settings-privacy-note {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-left: 2px solid #8a7650;
+  background: #eee8dc;
+  color: #5f5b53;
 }
 
 .settings-choice-grid {
@@ -1662,6 +1854,14 @@ body.library-mode {
   font-size: 9px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.library-detail__description {
+  margin: 8px 0 0;
+  color: #5f5a51;
+  font-family: ui-serif, "Songti SC", "STSong", Georgia, serif;
+  font-size: 11px;
+  line-height: 1.65;
 }
 
 .library-detail__facts {

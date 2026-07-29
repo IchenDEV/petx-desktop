@@ -15,6 +15,7 @@
       "identifier": "opener:allow-open-url",
       "allow": [
         { "url": "https://petdex.dev/*" },
+        { "url": "https://petshare.idevlab.dev/*" },
         { "url": "https://github.com/*" },
         { "url": "https://www.deviantart.com/*" },
         { "url": "https://itch.io/*" },

@@ -1,17 +1,19 @@
 import { PetX } from '@petx/react';
 import { useEffect, useRef, useState } from 'react';
 import {
-  fetchPetdexPreview,
+  fetchCatalogPreview,
   type ResolvedPetPreview,
 } from './client';
+import type { DirectLibrarySourceId } from './model';
 
 interface PetPreviewProps {
   id: string;
   name: string;
   localSrc?: string;
   localSpriteVersionNumber?: number;
-  petdexSrc?: string;
-  petdexManifestSrc?: string;
+  source: DirectLibrarySourceId;
+  catalogSrc?: string;
+  catalogManifestSrc?: string;
   size: number;
   animate?: boolean;
   eager?: boolean;
@@ -24,8 +26,9 @@ export function PetPreview({
   name,
   localSrc,
   localSpriteVersionNumber = 1,
-  petdexSrc,
-  petdexManifestSrc,
+  source,
+  catalogSrc,
+  catalogManifestSrc,
   size,
   animate = false,
   eager = false,
@@ -76,13 +79,13 @@ export function PetPreview({
       onReady?.();
       return;
     }
-    if (!petdexSrc || !petdexManifestSrc) {
+    if (!catalogSrc || !catalogManifestSrc) {
       setFailed(true);
       onError?.();
       return;
     }
 
-    void fetchPetdexPreview(id, petdexSrc, petdexManifestSrc)
+    void fetchCatalogPreview(source, id, catalogSrc, catalogManifestSrc)
       .then((resolved) => {
         if (active) {
           setPreview(resolved);
@@ -105,8 +108,9 @@ export function PetPreview({
     localSrc,
     onError,
     onReady,
-    petdexManifestSrc,
-    petdexSrc,
+    catalogManifestSrc,
+    catalogSrc,
+    source,
     visible,
   ]);
 

@@ -30,6 +30,16 @@ export default defineConfig({
         },
         rewrite: (path) => path.replace(/^\/__petdex\/assets/, ''),
       },
+      '/__petshare/catalog': {
+        target: 'https://petshare.idevlab.dev',
+        changeOrigin: true,
+        rewrite: () => '/pets.json',
+      },
+      '/__petshare/assets': {
+        target: 'https://petshare.idevlab.dev',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/__petshare\/assets/, ''),
+      },
     },
   },
   envPrefix: ['VITE_', 'TAURI_'],

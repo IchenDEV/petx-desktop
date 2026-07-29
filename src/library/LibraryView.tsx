@@ -10,16 +10,19 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isTauri } from '../platform';
 import {
   fetchInstalledPets,
-  fetchPetdexCatalog,
-  installPetdexPet,
+  fetchCatalog,
+  installCatalogPet,
   installedSpriteUrl,
   openExternalPage,
 } from './client';
 import {
+  isDirectLibrarySource,
   LIBRARY_SOURCES,
+  libraryPetKey,
   sourceById,
   type CatalogItem,
   type CatalogResponse,
+  type DirectLibrarySourceId,
   type InstalledPet,
   type LibrarySourceId,
 } from './model';
@@ -27,71 +30,160 @@ import { PetPreview } from './PetPreview';
 
 const INITIAL_RESULT_LIMIT = 72;
 const RESULT_LIMIT_STEP = 72;
+const CATALOG_REFRESH_INTERVAL_MS = 10 * 60 * 1_000;
 
 type Notice = {
   tone: 'status' | 'error';
   text: string;
+  sourceId?: LibrarySourceId;
 };
 
 export function LibraryView() {
   const [sourceId, setSourceId] = useState<LibrarySourceId>('petdex');
-  const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
+  const [catalogs, setCatalogs] = useState<
+    Partial<Record<DirectLibrarySourceId, CatalogResponse>>
+  >({});
+  const [catalogErrors, setCatalogErrors] = useState<
+    Partial<Record<DirectLibrarySourceId, string>>
+  >({});
+  const [loadingSources, setLoadingSources] = useState<
+    ReadonlySet<DirectLibrarySourceId>
+  >(() => new Set());
   const [installed, setInstalled] = useState<InstalledPet[]>([]);
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [onlyInstalled, setOnlyInstalled] = useState(false);
   const [resultLimit, setResultLimit] = useState(INITIAL_RESULT_LIMIT);
-  const [loading, setLoading] = useState(true);
-  const [catalogError, setCatalogError] = useState<string | null>(null);
-  const [installingSlug, setInstallingSlug] = useState<string | null>(null);
+  const [installingKey, setInstallingKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const catalogsRef = useRef(catalogs);
+  const catalogRequests = useRef(new Set<DirectLibrarySourceId>());
+  const catalogLoadedAt = useRef<
+    Partial<Record<DirectLibrarySourceId, number>>
+  >({});
+  catalogsRef.current = catalogs;
   const deferredQuery = useDeferredValue(query);
+  const directSourceId = isDirectLibrarySource(sourceId)
+    ? sourceId
+    : null;
+  const catalog = directSourceId ? catalogs[directSourceId] ?? null : null;
+  const catalogError = directSourceId
+    ? catalogErrors[directSourceId] ?? null
+    : null;
+  const loading =
+    directSourceId !== null && loadingSources.has(directSourceId);
 
-  const installedBySlug = useMemo(
-    () => new Map(installed.map((pet) => [pet.slug, pet])),
+  const installedByKey = useMemo(
+    () =>
+      new Map(
+        installed.map((pet) => [
+          libraryPetKey(pet.source, pet.slug),
+          pet,
+        ]),
+      ),
     [installed],
   );
 
-  const loadLibrary = useCallback(async () => {
-    setLoading(true);
-    setCatalogError(null);
+  const loadCatalog = useCallback(async (target: DirectLibrarySourceId) => {
+    if (catalogRequests.current.has(target)) return;
+    catalogRequests.current.add(target);
+    setLoadingSources((current) => new Set(current).add(target));
+    setCatalogErrors((current) => {
+      const next = { ...current };
+      delete next[target];
+      return next;
+    });
     setNotice(null);
-    const [catalogResult, installedResult] = await Promise.allSettled([
-      fetchPetdexCatalog(),
-      fetchInstalledPets(),
-    ]);
-
-    if (installedResult.status === 'fulfilled') {
-      setInstalled(installedResult.value);
-    } else {
-      console.error('Unable to read installed pets', installedResult.reason);
-      setNotice({
-        tone: 'error',
-        text: '目录可以浏览，但暂时无法读取本地宠物库。',
+    try {
+      const result = await fetchCatalog(target);
+      catalogLoadedAt.current[target] = Date.now();
+      setCatalogs((current) => ({ ...current, [target]: result }));
+    } catch (error) {
+      if (catalogsRef.current[target]) {
+        setNotice({
+          tone: 'error',
+          sourceId: target,
+          text: `${sourceById(target).name} 更新失败，继续显示上一次打开的目录。`,
+        });
+      } else {
+        setCatalogErrors((current) => ({
+          ...current,
+          [target]: errorMessage(error),
+        }));
+      }
+    } finally {
+      catalogRequests.current.delete(target);
+      setLoadingSources((current) => {
+        const next = new Set(current);
+        next.delete(target);
+        return next;
       });
     }
-
-    if (catalogResult.status === 'fulfilled') {
-      setCatalog(catalogResult.value);
-      setSelectedSlug((current) =>
-        current &&
-        catalogResult.value.items.some((item) => item.slug === current)
-          ? current
-          : (catalogResult.value.items[0]?.slug ?? null),
-      );
-    } else {
-      const message = errorMessage(catalogResult.reason);
-      setCatalogError(message);
-    }
-    setLoading(false);
   }, []);
 
   useEffect(() => {
     document.body.classList.add('library-mode');
-    void loadLibrary();
+    void fetchInstalledPets()
+      .then(setInstalled)
+      .catch((error: unknown) => {
+        console.error('Unable to read installed pets', error);
+        setNotice({
+          tone: 'error',
+          text: '目录可以浏览，但暂时无法读取本地宠物库。',
+        });
+      });
     return () => document.body.classList.remove('library-mode');
-  }, [loadLibrary]);
+  }, []);
+
+  useEffect(() => {
+    if (
+      directSourceId === null ||
+      catalogErrors[directSourceId] ||
+      loadingSources.has(directSourceId)
+    ) {
+      return;
+    }
+    const catalogExpired =
+      Date.now() - (catalogLoadedAt.current[directSourceId] ?? 0) >=
+      CATALOG_REFRESH_INTERVAL_MS;
+    if (catalogs[directSourceId] && !catalogExpired) return;
+    void loadCatalog(directSourceId);
+  }, [
+    catalogErrors,
+    catalogs,
+    directSourceId,
+    loadCatalog,
+    loadingSources,
+  ]);
+
+  useEffect(() => {
+    if (directSourceId === null) return;
+    const refreshIfExpired = () => {
+      const loadedAt = catalogLoadedAt.current[directSourceId] ?? 0;
+      if (Date.now() - loadedAt >= CATALOG_REFRESH_INTERVAL_MS) {
+        void loadCatalog(directSourceId);
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') refreshIfExpired();
+    };
+    window.addEventListener('focus', refreshIfExpired);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('focus', refreshIfExpired);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [directSourceId, loadCatalog]);
+
+  useEffect(() => {
+    if (directSourceId === null) return;
+    setSelectedSlug((current) =>
+      current && catalog?.items.some((item) => item.slug === current)
+        ? current
+        : (catalog?.items[0]?.slug ?? null),
+    );
+  }, [catalog, directSourceId]);
 
   useEffect(() => {
     setResultLimit(INITIAL_RESULT_LIMIT);
@@ -120,14 +212,26 @@ export function LibraryView() {
   const filteredItems = useMemo(() => {
     const normalized = normalizeSearch(deferredQuery);
     return (catalog?.items ?? []).filter((item) => {
-      if (onlyInstalled && !installedBySlug.has(item.slug)) return false;
+      if (
+        onlyInstalled &&
+        directSourceId &&
+        !installedByKey.has(libraryPetKey(directSourceId, item.slug))
+      ) {
+        return false;
+      }
       if (!normalized) return true;
       const haystack = normalizeSearch(
-        `${item.displayName} ${item.slug} ${item.submittedBy ?? ''}`,
+        `${item.displayName} ${item.slug} ${item.description ?? ''} ${item.submittedBy ?? ''}`,
       );
       return haystack.includes(normalized);
     });
-  }, [catalog?.items, deferredQuery, installedBySlug, onlyInstalled]);
+  }, [
+    catalog?.items,
+    deferredQuery,
+    directSourceId,
+    installedByKey,
+    onlyInstalled,
+  ]);
 
   const selectedItem = useMemo(
     () =>
@@ -136,29 +240,46 @@ export function LibraryView() {
       null,
     [filteredItems, selectedSlug],
   );
-  const selectedInstalled = selectedItem
-    ? installedBySlug.get(selectedItem.slug)
+  const selectedInstalled = selectedItem && directSourceId
+    ? installedByKey.get(libraryPetKey(directSourceId, selectedItem.slug))
     : undefined;
   const source = sourceById(sourceId);
+  const visibleNotice =
+    notice?.sourceId === undefined || notice.sourceId === sourceId
+      ? notice
+      : null;
 
   const installSelected = async () => {
-    if (!selectedItem || installingSlug) return;
-    setInstallingSlug(selectedItem.slug);
+    if (!selectedItem || !directSourceId || installingKey) return;
+    const key = libraryPetKey(directSourceId, selectedItem.slug);
+    setInstallingKey(key);
     setNotice(null);
     try {
-      const pet = await installPetdexPet(selectedItem.slug);
+      const pet = await installCatalogPet(
+        directSourceId,
+        selectedItem.slug,
+      );
       setInstalled((current) => [
-        ...current.filter((item) => item.slug !== pet.slug),
+        ...current.filter(
+          (item) =>
+            libraryPetKey(item.source, item.slug) !==
+            libraryPetKey(pet.source, pet.slug),
+        ),
         pet,
       ]);
       setNotice({
         tone: 'status',
+        sourceId: directSourceId,
         text: `${pet.displayName} 已收进本地宠物库，可离线预览。`,
       });
     } catch (error) {
-      setNotice({ tone: 'error', text: errorMessage(error) });
+      setNotice({
+        tone: 'error',
+        sourceId: directSourceId,
+        text: errorMessage(error),
+      });
     } finally {
-      setInstallingSlug(null);
+      setInstallingKey(null);
     }
   };
 
@@ -168,6 +289,7 @@ export function LibraryView() {
     } catch (error) {
       setNotice({
         tone: 'error',
+        sourceId,
         text: `没有打开系统浏览器：${errorMessage(error)}`,
       });
     }
@@ -182,20 +304,20 @@ export function LibraryView() {
         </div>
         <div className="library-search-tools">
           <label className="library-search">
-            <span className="sr-only">搜索名字或作者</span>
+            <span className="sr-only">搜索名字、描述或作者</span>
             <input
               ref={searchRef}
               type="search"
               value={query}
-              placeholder="搜索名字或作者"
-              disabled={sourceId !== 'petdex'}
+              placeholder="搜索名字、描述或作者"
+              disabled={directSourceId === null}
               onChange={(event) => setQuery(event.target.value)}
             />
             <kbd>⌘ F</kbd>
           </label>
           <label
             className={
-              sourceId === 'petdex'
+              directSourceId !== null
                 ? 'library-installed-filter'
                 : 'library-installed-filter is-disabled'
             }
@@ -203,7 +325,7 @@ export function LibraryView() {
             <input
               type="checkbox"
               checked={onlyInstalled}
-              disabled={sourceId !== 'petdex'}
+              disabled={directSourceId === null}
               onChange={(event) => setOnlyInstalled(event.target.checked)}
             />
             <span>只看已收藏</span>
@@ -241,15 +363,20 @@ export function LibraryView() {
           </div>
         </nav>
 
-        {sourceId === 'petdex' ? (
+        {directSourceId !== null ? (
           <>
-            <section className="library-catalog" aria-label="Petdex 宠物目录">
+            <section
+              className="library-catalog"
+              aria-label={`${source.name} 宠物目录`}
+            >
               <div className="library-catalog__heading">
                 <div>
-                  <h2>Petdex 目录</h2>
+                  <h2>{source.name} 目录</h2>
                   <p>
                     {loading
-                      ? '正在取回目录'
+                      ? catalog
+                        ? `正在更新 · ${filteredItems.length.toLocaleString('zh-CN')} 只伙伴`
+                        : '正在取回目录'
                       : catalogError
                         ? '目录暂不可用'
                         : `${filteredItems.length.toLocaleString('zh-CN')} 只伙伴`}
@@ -258,20 +385,27 @@ export function LibraryView() {
                 {catalog?.stale ? <span>离线缓存</span> : null}
               </div>
 
-              {loading ? (
+              {loading && !catalog ? (
                 <LibraryLoading label="正在整理伙伴档案…" />
-              ) : catalogError ? (
-                <LibraryError message={catalogError} onRetry={loadLibrary} />
+              ) : catalogError && !catalog ? (
+                <LibraryError
+                  message={catalogError}
+                  onRetry={() => void loadCatalog(directSourceId)}
+                />
               ) : filteredItems.length === 0 ? (
                 <LibraryEmpty onlyInstalled={onlyInstalled} query={query} />
               ) : (
                 <div className="library-catalog__scroll">
                   <ol className="library-pet-list">
                     {filteredItems.slice(0, resultLimit).map((item) => {
-                      const localPet = installedBySlug.get(item.slug);
-                      const installing = installingSlug === item.slug;
+                      const itemKey = libraryPetKey(
+                        directSourceId,
+                        item.slug,
+                      );
+                      const localPet = installedByKey.get(itemKey);
+                      const installing = installingKey === itemKey;
                       return (
-                        <li key={item.slug}>
+                        <li key={itemKey}>
                           <button
                             className={
                               selectedItem?.slug === item.slug
@@ -285,6 +419,7 @@ export function LibraryView() {
                             <PetPreview
                               id={item.slug}
                               name={item.displayName}
+                              source={directSourceId}
                               localSrc={
                                 localPet
                                   ? installedSpriteUrl(localPet)
@@ -293,10 +428,10 @@ export function LibraryView() {
                               localSpriteVersionNumber={
                                 localPet?.spriteVersionNumber
                               }
-                              petdexSrc={
+                              catalogSrc={
                                 localPet ? undefined : item.spritesheetUrl
                               }
-                              petdexManifestSrc={
+                              catalogManifestSrc={
                                 localPet ? undefined : item.petJsonUrl
                               }
                               size={68}
@@ -306,7 +441,9 @@ export function LibraryView() {
                               <span>
                                 {item.submittedBy
                                   ? `投稿者 ${item.submittedBy}`
-                                  : '投稿者未署名'}
+                                  : directSourceId === 'petshare'
+                                    ? '站点未提供作者'
+                                    : '投稿者未署名'}
                               </span>
                               <small>{kindLabel(item.kind)}</small>
                             </span>
@@ -346,9 +483,15 @@ export function LibraryView() {
             <section className="library-detail" aria-live="polite">
               {selectedItem ? (
                 <PetDetail
+                  key={libraryPetKey(directSourceId, selectedItem.slug)}
                   item={selectedItem}
+                  sourceId={directSourceId}
                   installed={selectedInstalled}
-                  installing={installingSlug === selectedItem.slug}
+                  installing={
+                    installingKey ===
+                    libraryPetKey(directSourceId, selectedItem.slug)
+                  }
+                  libraryBusy={installingKey !== null}
                   installAvailable={isTauri}
                   onInstall={installSelected}
                   onOpenSource={() => void openPage(selectedItem.sourcePageUrl)}
@@ -372,13 +515,13 @@ export function LibraryView() {
         <p>{catalogStatus(catalog, sourceId)}</p>
         <p
           className={
-            notice?.tone === 'error'
+            visibleNotice?.tone === 'error'
               ? 'library-notice is-error'
               : 'library-notice'
           }
           role="status"
         >
-          {notice?.text ?? '收藏不会改变你和当前伙伴的关系。'}
+          {visibleNotice?.text ?? '收藏不会改变你和当前伙伴的关系。'}
         </p>
       </footer>
     </main>
@@ -387,8 +530,10 @@ export function LibraryView() {
 
 interface PetDetailProps {
   item: CatalogItem;
+  sourceId: DirectLibrarySourceId;
   installed?: InstalledPet;
   installing: boolean;
+  libraryBusy: boolean;
   installAvailable: boolean;
   onInstall: () => void;
   onOpenSource: () => void;
@@ -396,19 +541,22 @@ interface PetDetailProps {
 
 function PetDetail({
   item,
+  sourceId,
   installed,
   installing,
+  libraryBusy,
   installAvailable,
   onInstall,
   onOpenSource,
 }: PetDetailProps) {
+  const source = sourceById(sourceId);
   const [previewState, setPreviewState] = useState<
     'loading' | 'ready' | 'failed'
   >(installed ? 'ready' : 'loading');
 
   useEffect(() => {
     setPreviewState(installed ? 'ready' : 'loading');
-  }, [installed, item.slug]);
+  }, [installed, item.slug, sourceId]);
 
   const handlePreviewReady = useCallback(() => {
     setPreviewState('ready');
@@ -423,10 +571,11 @@ function PetDetail({
         <PetPreview
           id={item.slug}
           name={item.displayName}
+          source={sourceId}
           localSrc={installed ? installedSpriteUrl(installed) : undefined}
           localSpriteVersionNumber={installed?.spriteVersionNumber}
-          petdexSrc={installed ? undefined : item.spritesheetUrl}
-          petdexManifestSrc={installed ? undefined : item.petJsonUrl}
+          catalogSrc={installed ? undefined : item.spritesheetUrl}
+          catalogManifestSrc={installed ? undefined : item.petJsonUrl}
           size={210}
           animate
           eager
@@ -441,14 +590,21 @@ function PetDetail({
         <p>{item.slug}</p>
       </div>
 
+      {item.description ? (
+        <p className="library-detail__description">{item.description}</p>
+      ) : null}
+
       <dl className="library-detail__facts">
         <div>
-          <dt>投稿者</dt>
-          <dd>{item.submittedBy ?? '未署名'}</dd>
+          <dt>作者</dt>
+          <dd>
+            {item.submittedBy ??
+              (sourceId === 'petshare' ? '站点未提供' : '未署名')}
+          </dd>
         </div>
         <div>
           <dt>来源</dt>
-          <dd>Petdex</dd>
+          <dd>{source.name}</dd>
         </div>
         <div>
           <dt>格式</dt>
@@ -458,7 +614,9 @@ function PetDetail({
 
       <div className="library-detail__statuses" aria-label="兼容与授权状态">
         <span>PetX 兼容</span>
-        <span className="is-caution">授权需自行确认</span>
+        <span className="is-caution">
+          {sourceId === 'petshare' ? '许可未声明' : '授权需自行确认'}
+        </span>
       </div>
 
       <button
@@ -466,6 +624,7 @@ function PetDetail({
         type="button"
         disabled={
           Boolean(installed) ||
+          libraryBusy ||
           installing ||
           !installAvailable ||
           previewState !== 'ready'
@@ -476,6 +635,8 @@ function PetDetail({
           ? '正在检查并收进宠物库…'
           : installed
             ? '已在本地宠物库'
+            : libraryBusy
+              ? '正在处理另一只伙伴…'
             : !installAvailable
               ? '桌面版可收藏'
               : previewState === 'failed'
@@ -494,7 +655,7 @@ function PetDetail({
         type="button"
         onClick={onOpenSource}
       >
-        在 Petdex 查看 <span aria-hidden="true">↗</span>
+        在 {source.name} 查看 <span aria-hidden="true">↗</span>
       </button>
 
       <p className="library-safety-note">
@@ -502,7 +663,9 @@ function PetDetail({
         收藏会复用刚刚预览并校验过的图集，不会运行代码。
       </p>
       <p className="library-rights-note">
-        Petdex 的社区审核不等于角色版权许可。请在公开展示、再分发或商用前确认作者与权利方要求。
+        {sourceId === 'petshare'
+          ? 'PetShare 当前没有提供作者、作品来源或许可字段。个人收藏不等于获得再分发、公开展示或商用授权。'
+          : 'Petdex 的社区审核不等于角色版权许可。请在公开展示、再分发或商用前确认作者与权利方要求。'}
       </p>
     </div>
   );
@@ -512,7 +675,7 @@ function ExternalSourceView({
   sourceId,
   onOpen,
 }: {
-  sourceId: Exclude<LibrarySourceId, 'petdex'>;
+  sourceId: LibrarySourceId;
   onOpen: () => void;
 }) {
   const source = sourceById(sourceId);
@@ -594,7 +757,7 @@ function LibraryEmpty({
         {onlyInstalled
           ? '本地收藏里没有符合条件的伙伴。'
           : query
-            ? `没有找到与“${query}”相符的名字或作者。`
+            ? `没有找到与“${query}”相符的名字、描述或作者。`
             : '目录暂时是空的。'}
       </p>
     </div>
@@ -624,8 +787,15 @@ function catalogStatus(
   catalog: CatalogResponse | null,
   sourceId: LibrarySourceId,
 ) {
-  if (sourceId !== 'petdex') return '外部来源会交给系统浏览器打开';
-  if (!catalog) return 'Petdex 官方目录';
+  if (!isDirectLibrarySource(sourceId)) {
+    return '外部来源会交给系统浏览器打开';
+  }
+  if (!catalog) return `${sourceById(sourceId).name} 公开目录`;
+  if (sourceId === 'petshare') {
+    return catalog.stale
+      ? `PetShare 离线目录 · ${catalog.total.toLocaleString('zh-CN')} 只`
+      : `PetShare 公开快照 · ${catalog.total.toLocaleString('zh-CN')} 只`;
+  }
   const date = new Date(catalog.generatedAt);
   const formatted = Number.isNaN(date.getTime())
     ? '最近一次'

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct CatalogItem {
     pub slug: String,
     pub display_name: String,
+    pub description: Option<String>,
     pub kind: String,
     pub submitted_by: Option<String>,
     pub spritesheet_url: String,
@@ -24,6 +25,7 @@ pub struct CatalogResponse {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledPet {
+    pub source: String,
     pub slug: String,
     pub display_name: String,
     pub description: Option<String>,
@@ -76,6 +78,20 @@ pub(super) type CompactManifestPet = (
     String,
     Option<String>,
 );
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PetshareCatalogEntry {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub sprite_version_number: u8,
+    pub spritesheet_path: String,
+    pub manifest_path: String,
+    pub download_path: String,
+}
+
+pub(super) type PetshareManifest = Vec<PetshareCatalogEntry>;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

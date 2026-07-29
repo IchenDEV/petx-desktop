@@ -10,6 +10,7 @@ export type CompanionSurface =
   | 'resting'
   | 'bubble'
   | 'care'
+  | 'presence'
   | 'journal'
   | 'context';
 
@@ -17,6 +18,7 @@ const companionSizes: Record<CompanionSurface, LogicalSize> = {
   resting: new LogicalSize(248, 276),
   bubble: new LogicalSize(448, 356),
   care: new LogicalSize(500, 356),
+  presence: new LogicalSize(520, 516),
   journal: new LogicalSize(620, 470),
   context: new LogicalSize(390, 360),
 };
@@ -36,6 +38,7 @@ export function getPreviewSurface(): CompanionSurface | null {
   const value = new URLSearchParams(window.location.search).get('preview');
   return value === 'bubble' ||
     value === 'care' ||
+    value === 'presence' ||
     value === 'journal' ||
     value === 'context'
     ? value
@@ -133,6 +136,11 @@ export async function quietCompanionForOneHour() {
   }
 }
 
+export async function isCompanionQuietPeriodActive() {
+  if (!isTauri) return false;
+  return invoke<boolean>('is_quiet_period_active');
+}
+
 export async function quitApplication() {
   if (!isTauri) {
     window.close();
@@ -149,6 +157,7 @@ export async function notifyMainWindow(event: string, payload?: unknown) {
 }
 
 export interface CompanionMenuActions {
+  openPresence: () => void;
   openCare: () => void;
   openLibrary: () => void;
   openJournal: () => void;
@@ -169,6 +178,11 @@ export async function showCompanionContextMenu(
         id: 'open-care',
         text: '照料一下…',
         action: actions.openCare,
+      },
+      {
+        id: 'presence-note',
+        text: '桌面札记…',
+        action: () => actions.openPresence(),
       },
       {
         id: 'open-library',

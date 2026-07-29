@@ -18,6 +18,7 @@ import {
   getCareSnapshot,
   getRelationshipStage,
   greet,
+  isWithinQuietHours,
   pet,
   play,
   recordKeepsake,
@@ -33,6 +34,7 @@ import {
 import {
   getPreviewSurface,
   hideCompanion,
+  isCompanionQuietPeriodActive,
   isTauri,
   quietCompanionForOneHour,
   quitApplication,
@@ -49,6 +51,20 @@ import { CarePanel } from './CarePanel';
 import { MemoryJournal } from './MemoryJournal';
 import { SpeechBubble } from './SpeechBubble';
 import { playCompanionChime } from './sound';
+import {
+  getCompanionNotificationStatus,
+  sendCompanionNotification,
+} from '../system/client';
+import { PresencePanel } from '../system/PresencePanel';
+import {
+  createSystemReactionMemory,
+  decideSystemReaction,
+} from '../system/reactionPolicy';
+import { useSystemAwareness } from '../system/useSystemAwareness';
+import {
+  companionNotificationIsAllowed,
+  type CompanionNotificationStatus,
+} from '../system/model';
 
 const petManifest: CodexPetManifest = {
   id: 'frieren',
@@ -58,7 +74,12 @@ const petManifest: CodexPetManifest = {
   spritesheetPath: 'spritesheet.webp',
 };
 
-type BubbleKind = 'welcome' | 'return' | 'response' | 'proactive';
+type BubbleKind =
+  | 'welcome'
+  | 'return'
+  | 'response'
+  | 'proactive'
+  | 'system';
 
 interface BubbleState {
   kind: BubbleKind;
@@ -90,6 +111,12 @@ export function CompanionView() {
   const [bubbleEngaged, setBubbleEngaged] = useState(false);
   const [careFeedback, setCareFeedback] = useState<string | null>(null);
   const [clock, setClock] = useState(() => new Date());
+  const system = useSystemAwareness();
+  const [notificationStatus, setNotificationStatus] =
+    useState<CompanionNotificationStatus>('notDetermined');
+  const [notificationPending, setNotificationPending] = useState(false);
+  const [quietPeriodActive, setQuietPeriodActive] = useState(false);
+  const systemReactionMemory = useRef(createSystemReactionMemory());
   const clickTimer = useRef<number | undefined>(undefined);
   const dismissTimer = useRef<number | undefined>(undefined);
   const pointerOrigin = useRef<{ x: number; y: number } | undefined>(
@@ -106,8 +133,22 @@ export function CompanionView() {
     () => decideIdleBehavior(state, clock),
     [clock, state],
   );
+  const systemSaysAway =
+    system.preferences.desktopAwareness &&
+    system.snapshot?.idleSeconds !== null &&
+    system.snapshot?.idleSeconds !== undefined &&
+    system.snapshot.idleSeconds >= 5 * 60;
+  const systemNeedsRest =
+    system.preferences.desktopAwareness &&
+    (system.snapshot?.lowPowerMode === true ||
+      system.snapshot?.thermalState === 'serious' ||
+      system.snapshot?.thermalState === 'critical' ||
+      (system.snapshot?.resources?.cpuPercent ?? 0) >= 90);
   const baseAnimation =
-    idleBehavior === 'sleeping' || idleBehavior === 'napping'
+    systemSaysAway ||
+    systemNeedsRest ||
+    idleBehavior === 'sleeping' ||
+    idleBehavior === 'napping'
       ? 'sleeping'
       : 'idle';
   const { play: playAnimation, presentation } = usePetAnimation(
@@ -174,6 +215,154 @@ export function CompanionView() {
     const timer = window.setInterval(() => setClock(new Date()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    const refreshNotificationStatus = () => {
+      void getCompanionNotificationStatus()
+        .then((status) => {
+          if (active) setNotificationStatus(status);
+        })
+        .catch((error: unknown) =>
+          console.error('Unable to read PetX notification status', error),
+        );
+    };
+    refreshNotificationStatus();
+    window.addEventListener('focus', refreshNotificationStatus);
+    return () => {
+      active = false;
+      window.removeEventListener('focus', refreshNotificationStatus);
+    };
+  }, [system.preferences.companionNotifications]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let disposed = false;
+    let quietEventObserved = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow()
+      .listen<boolean>('petx://quiet-period-changed', (event) => {
+        quietEventObserved = true;
+        if (!disposed) setQuietPeriodActive(event.payload === true);
+      })
+      .then(async (dispose) => {
+        if (disposed) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
+        const current = await isCompanionQuietPeriodActive();
+        if (!disposed && !quietEventObserved) {
+          setQuietPeriodActive(current);
+        }
+      })
+      .catch((error: unknown) =>
+        console.error('Unable to track the companion quiet period', error),
+      );
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    systemReactionMemory.current = createSystemReactionMemory();
+  }, [
+    system.preferences.desktopAwareness,
+    system.preferences.foregroundAppAwareness,
+  ]);
+
+  useEffect(() => {
+    const snapshot = system.snapshot;
+    if (snapshot === null || previewSurface !== null) return;
+    const reactionSnapshot = {
+      ...snapshot,
+      idleSeconds: system.preferences.desktopAwareness
+        ? snapshot.idleSeconds
+        : null,
+      frontmostAppName: system.preferences.foregroundAppAwareness
+        ? snapshot.frontmostAppName
+        : null,
+      power: system.preferences.desktopAwareness
+        ? snapshot.power
+        : {
+            source: 'unknown' as const,
+            percent: null,
+            charging: null,
+          },
+      network: system.preferences.desktopAwareness
+        ? snapshot.network
+        : ('unknown' as const),
+    };
+
+    const now = Date.now();
+    const decision = decideSystemReaction(
+      systemReactionMemory.current,
+      reactionSnapshot,
+      now,
+    );
+    systemReactionMemory.current = decision.memory;
+    const reaction = decision.reaction;
+    if (reaction === null) return;
+    if (
+      surfaceRef.current !== 'resting' ||
+      quietPeriodActive ||
+      state.proactivity.pendingSince !== null ||
+      isWithinQuietHours(state.preferences.quietHours, new Date(now))
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const presentReaction = async () => {
+      const visible =
+        document.visibilityState === 'visible' &&
+        (!isTauri || (await getCurrentWindow().isVisible()));
+      if (cancelled || surfaceRef.current !== 'resting') return;
+
+      if (!visible) {
+        if (isTauri && (await isCompanionQuietPeriodActive())) return;
+        if (
+          reaction.notificationReason &&
+          system.preferences.companionNotifications &&
+          companionNotificationIsAllowed(notificationStatus)
+        ) {
+          await sendCompanionNotification(reaction.notificationReason).catch(
+            (error: unknown) =>
+              console.error('Unable to send companion notification', error),
+          );
+        }
+        return;
+      }
+
+      setBubble({ kind: 'system', text: reaction.text });
+      if (
+        reaction.kind === 'returned' ||
+        reaction.kind === 'wake' ||
+        reaction.kind === 'charging'
+      ) {
+        playAnimation('waving');
+      }
+      setSurface('bubble');
+    };
+    void presentReaction().catch((error: unknown) =>
+      console.error('Unable to present a desktop reaction', error),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    notificationStatus,
+    playAnimation,
+    previewSurface,
+    quietPeriodActive,
+    state.preferences.quietHours,
+    state.proactivity.pendingSince,
+    system.preferences.companionNotifications,
+    system.preferences.desktopAwareness,
+    system.preferences.foregroundAppAwareness,
+    system.snapshot,
+  ]);
 
   useEffect(() => {
     if (previewSurface !== null || state.firstInteractionAt !== null) return;
@@ -404,8 +593,50 @@ export function CompanionView() {
     window.requestAnimationFrame(() => petButtonRef.current?.focus());
   }, []);
 
+  const closePresence = useCallback(() => {
+    setSurface('resting');
+    window.requestAnimationFrame(() => petButtonRef.current?.focus());
+  }, []);
+
+  const openPresence = useCallback(() => {
+    void system.refresh();
+    setSurface('presence');
+  }, [system.refresh]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow()
+      .listen('petx://open-presence', openPresence)
+      .then((dispose) => {
+        if (disposed) dispose();
+        else unlisten = dispose;
+      })
+      .catch((error: unknown) =>
+        console.error('Unable to listen for the tray desktop note', error),
+      );
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [openPresence]);
+
+  const testCompanionNotification = useCallback(async () => {
+    if (notificationPending) return;
+    setNotificationPending(true);
+    try {
+      await sendCompanionNotification('test');
+    } catch (error) {
+      console.error('Unable to send the test companion notification', error);
+    } finally {
+      setNotificationPending(false);
+    }
+  }, [notificationPending]);
+
   const openContextMenu = useCallback(async () => {
     const shownNatively = await showCompanionContextMenu({
+      openPresence,
       openCare,
       openLibrary: () => void showLibraryWindow(),
       openJournal: () => setSurface('journal'),
@@ -416,7 +647,7 @@ export function CompanionView() {
     }).catch(() => false);
 
     if (!shownNatively) setSurface('context');
-  }, [openCare]);
+  }, [openCare, openPresence]);
 
   const handlePointerUp = (
     event: React.PointerEvent<HTMLButtonElement>,
@@ -518,6 +749,21 @@ export function CompanionView() {
         />
       ) : null}
 
+      {surface === 'presence' ? (
+        <PresencePanel
+          snapshot={system.snapshot}
+          preferences={system.preferences}
+          notificationStatus={notificationStatus}
+          loading={system.loading}
+          error={system.error}
+          notificationPending={notificationPending}
+          onRefresh={() => void system.refresh()}
+          onTestNotification={() => void testCompanionNotification()}
+          onOpenSettings={() => void showSettingsWindow()}
+          onClose={closePresence}
+        />
+      ) : null}
+
       {surface === 'care' ? (
         <CarePanel
           nickname={presentedState.nickname}
@@ -533,6 +779,7 @@ export function CompanionView() {
 
       {surface === 'context' ? (
         <BrowserContextMenu
+          onPresence={openPresence}
           onCare={openCare}
           onJournal={() => setSurface('journal')}
           onLibrary={() => void showLibraryWindow()}
@@ -601,6 +848,7 @@ export function CompanionView() {
 }
 
 interface BrowserContextMenuProps {
+  onPresence: () => void;
   onCare: () => void;
   onLibrary: () => void;
   onJournal: () => void;
@@ -612,6 +860,7 @@ interface BrowserContextMenuProps {
 }
 
 function BrowserContextMenu({
+  onPresence,
   onCare,
   onLibrary,
   onJournal,
@@ -630,6 +879,7 @@ function BrowserContextMenu({
         onClick={onDismiss}
       />
       <nav className="pet-context-menu" aria-label="宠物菜单">
+        <button type="button" onClick={onPresence}>看看它眼里的桌面…</button>
         <button type="button" onClick={onCare}>照料一下…</button>
         <button type="button" onClick={onLibrary}>发现新伙伴…</button>
         <button type="button" onClick={onJournal}>打开纪念册</button>

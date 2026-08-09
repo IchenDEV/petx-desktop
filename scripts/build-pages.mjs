@@ -16,7 +16,8 @@ await mkdir(path.join(outputDir, "assets", "screenshots"), { recursive: true });
 await Promise.all([
   cp(path.join(siteDir, "index.html"), path.join(outputDir, "index.html")),
   cp(path.join(siteDir, "styles.css"), path.join(outputDir, "styles.css")),
-  cp(path.join(projectRoot, "src-tauri", "icons", "icon.png"), path.join(outputDir, "assets", "icon.png")),
+  cp(path.join(siteDir, "favicon.svg"), path.join(outputDir, "favicon.svg")),
+  cp(path.join(siteDir, "favicon-32.png"), path.join(outputDir, "favicon-32.png")),
   cp(path.join(projectRoot, "docs", "screenshots", "companion-greeting.png"), path.join(outputDir, "assets", "screenshots", "companion-greeting.png")),
   cp(path.join(projectRoot, "docs", "screenshots", "care-panel.png"), path.join(outputDir, "assets", "screenshots", "care-panel.png")),
   cp(path.join(projectRoot, "docs", "screenshots", "memory-journal.png"), path.join(outputDir, "assets", "screenshots", "memory-journal.png")),

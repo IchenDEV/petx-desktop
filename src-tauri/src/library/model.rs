@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum ActivePetSource {
     Petdex,
     Petshare,
+    Imported,
 }
 
 impl ActivePetSource {
@@ -12,6 +13,7 @@ impl ActivePetSource {
         match self {
             Self::Petdex => "petdex",
             Self::Petshare => "petshare",
+            Self::Imported => "imported",
         }
     }
 }
@@ -74,6 +76,8 @@ pub struct InstalledPet {
     pub source_page_url: String,
     pub sprite_version_number: u8,
     pub installed_at_epoch_seconds: u64,
+    pub last_used_at_epoch_seconds: Option<u64>,
+    pub use_count: u64,
     pub sha256: String,
 }
 
@@ -109,15 +113,7 @@ pub(super) struct CompactManifest {
     pub pets: Vec<CompactManifestPet>,
 }
 
-pub(super) type CompactManifestPet = (
-    String,
-    String,
-    String,
-    Option<String>,
-    String,
-    String,
-    Option<String>,
-);
+pub(super) type CompactManifestPet = Vec<serde_json::Value>;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,6 +140,10 @@ pub(super) struct InstallationRecord {
     pub source_page_url: String,
     pub manifest_generated_at: String,
     pub installed_at_epoch_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at_epoch_seconds: Option<u64>,
+    #[serde(default)]
+    pub use_count: u64,
     pub sha256: String,
 }
 

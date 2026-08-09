@@ -13,6 +13,7 @@ import type {
   CatalogResponse,
   DirectLibrarySourceId,
   InstalledPet,
+  InstalledPetSourceId,
   ResolvedActivePet,
 } from './model';
 
@@ -20,6 +21,19 @@ const PREVIEW_MANIFEST_URL = '/__petdex/manifest';
 const PETSHARE_PREVIEW_MANIFEST_URL = '/__petshare/catalog';
 const PETDEX_ASSET_BASE = 'https://assets.petdex.dev';
 const PETSHARE_ASSET_BASE = 'https://petshare.idevlab.dev';
+const PETDEX_LEGACY_FIELDS = [
+  'slug',
+  'displayName',
+  'kind',
+  'submittedBy',
+  'spritesheet',
+  'petJson',
+  'zip',
+] as const;
+const PETDEX_CURRENT_FIELDS = [
+  ...PETDEX_LEGACY_FIELDS,
+  'spriteVersionNumber',
+] as const;
 const previewRequests = new Map<string, Promise<ResolvedPetPreview>>();
 
 export const ACTIVE_PET_CHANGED_EVENT = 'petx://active-pet-changed';
@@ -52,7 +66,7 @@ export async function fetchActivePet(): Promise<ResolvedActivePet> {
 export const getActivePet = fetchActivePet;
 
 export async function setActivePet(
-  source: DirectLibrarySourceId,
+  source: InstalledPetSourceId,
   slug: string,
 ): Promise<ResolvedActivePet> {
   if (!isTauri) {
@@ -113,7 +127,7 @@ export async function fetchPetdexCatalog(): Promise<CatalogResponse> {
   if (!response.ok) {
     throw new Error(`预览目录请求失败（HTTP ${response.status}）。`);
   }
-  return parseCompactManifest(await response.json());
+  return parsePetdexCatalog(await response.json());
 }
 
 export async function fetchPetshareCatalog(): Promise<CatalogResponse> {
@@ -137,6 +151,26 @@ export function fetchCatalog(
 export async function fetchInstalledPets(): Promise<InstalledPet[]> {
   if (!isTauri) return [];
   return invoke<InstalledPet[]>('list_installed_pets');
+}
+
+export async function chooseAndImportLocalPet(): Promise<InstalledPet | null> {
+  if (!isTauri) {
+    throw new Error('请在 PetX 桌面版里导入本地伙伴。');
+  }
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({
+    title: '选择宠物文件夹里的 pet.json',
+    multiple: false,
+    directory: false,
+    filters: [{ name: 'PetX 宠物清单', extensions: ['json'] }],
+  });
+  if (selected === null) return null;
+  if (Array.isArray(selected)) {
+    throw new Error('一次只能导入一只伙伴。');
+  }
+  return invoke<InstalledPet>('import_local_pet', {
+    manifestPath: selected,
+  });
 }
 
 export async function installPetdexPet(slug: string): Promise<InstalledPet> {
@@ -258,7 +292,7 @@ async function resolveCatalogPreview(
   };
 }
 
-function parseCompactManifest(value: unknown): CatalogResponse {
+export function parsePetdexCatalog(value: unknown): CatalogResponse {
   if (!isRecord(value) || value.v !== 2) {
     throw new Error('Petdex 预览目录版本无法识别。');
   }
@@ -266,12 +300,22 @@ function parseCompactManifest(value: unknown): CatalogResponse {
     value.assetBase !== PETDEX_ASSET_BASE ||
     typeof value.generatedAt !== 'string' ||
     typeof value.total !== 'number' ||
+    !Array.isArray(value.fields) ||
     !Array.isArray(value.pets)
   ) {
     throw new Error('Petdex 预览目录字段不完整。');
   }
 
-  const items = value.pets.map(parseCompactItem);
+  const fieldsAreLegacy = sameStringFields(value.fields, PETDEX_LEGACY_FIELDS);
+  const fieldsAreCurrent = sameStringFields(value.fields, PETDEX_CURRENT_FIELDS);
+  if (!fieldsAreLegacy && !fieldsAreCurrent) {
+    throw new Error('Petdex 预览目录字段发生了不兼容变化。');
+  }
+
+  const expectedItemLength = fieldsAreCurrent ? 8 : 7;
+  const items = value.pets.map((item) =>
+    parseCompactItem(item, expectedItemLength),
+  );
   if (items.length !== value.total) {
     throw new Error('Petdex 预览目录条目数量不一致。');
   }
@@ -283,16 +327,21 @@ function parseCompactManifest(value: unknown): CatalogResponse {
   };
 }
 
-function parseCompactItem(value: unknown): CatalogItem {
+function parseCompactItem(
+  value: unknown,
+  expectedLength: 7 | 8,
+): CatalogItem {
   if (
     !Array.isArray(value) ||
-    value.length !== 7 ||
+    value.length !== expectedLength ||
     typeof value[0] !== 'string' ||
     typeof value[1] !== 'string' ||
     typeof value[2] !== 'string' ||
     (value[3] !== null && typeof value[3] !== 'string') ||
     typeof value[4] !== 'string' ||
-    typeof value[5] !== 'string'
+    typeof value[5] !== 'string' ||
+    typeof value[6] !== 'string' ||
+    (expectedLength === 8 && value[7] !== 1 && value[7] !== 2)
   ) {
     throw new Error('Petdex 预览目录中有无法识别的条目。');
   }
@@ -307,6 +356,16 @@ function parseCompactItem(value: unknown): CatalogItem {
     petJsonUrl: resolvePetdexAsset(value[5]),
     sourcePageUrl: `https://petdex.dev/pets/${encodeURIComponent(slug)}`,
   };
+}
+
+function sameStringFields(
+  value: unknown[],
+  expected: readonly string[],
+): boolean {
+  return (
+    value.length === expected.length &&
+    value.every((field, index) => field === expected[index])
+  );
 }
 
 function parsePetshareManifest(value: unknown): CatalogResponse {

@@ -9,6 +9,7 @@ import {
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isTauri } from '../platform';
 import {
+  chooseAndImportLocalPet,
   fetchActivePet,
   fetchInstalledPets,
   fetchCatalog,
@@ -27,6 +28,8 @@ import {
   LIBRARY_SOURCES,
   libraryPetKey,
   sourceById,
+  sortInstalledPetsByHistory,
+  installedPetSourceLabel,
   type CatalogItem,
   type CatalogResponse,
   type DirectLibrarySourceId,
@@ -48,7 +51,7 @@ type Notice = {
 };
 
 export function LibraryView() {
-  const [sourceId, setSourceId] = useState<LibrarySourceId>('petdex');
+  const [sourceId, setSourceId] = useState<LibrarySourceId>('local');
   const [catalogs, setCatalogs] = useState<
     Partial<Record<DirectLibrarySourceId, CatalogResponse>>
   >({});
@@ -59,7 +62,10 @@ export function LibraryView() {
     ReadonlySet<DirectLibrarySourceId>
   >(() => new Set());
   const [installed, setInstalled] = useState<InstalledPet[]>([]);
+  const [installedLoading, setInstalledLoading] = useState(true);
+  const [importing, setImporting] = useState(false);
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  const [selectedLocalKey, setSelectedLocalKey] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [onlyInstalled, setOnlyInstalled] = useState(false);
   const [resultLimit, setResultLimit] = useState(INITIAL_RESULT_LIMIT);
@@ -82,6 +88,7 @@ export function LibraryView() {
   catalogsRef.current = catalogs;
   activePetRef.current = activePet;
   const deferredQuery = useDeferredValue(query);
+  const localMode = sourceId === 'local';
   const directSourceId = isDirectLibrarySource(sourceId)
     ? sourceId
     : null;
@@ -91,6 +98,27 @@ export function LibraryView() {
     : null;
   const loading =
     directSourceId !== null && loadingSources.has(directSourceId);
+
+  const localHistory = useMemo(() => {
+    const normalized = normalizeSearch(deferredQuery);
+    const history = sortInstalledPetsByHistory(installed);
+    if (!normalized) return history;
+    return history.filter((pet) =>
+      normalizeSearch(
+        `${pet.displayName} ${pet.slug} ${pet.description ?? ''} ${pet.submittedBy ?? ''} ${installedPetSourceLabel(pet.source)}`,
+      ).includes(normalized),
+    );
+  }, [deferredQuery, installed]);
+
+  const selectedLocalPet = useMemo(
+    () =>
+      localHistory.find(
+        (pet) => libraryPetKey(pet.source, pet.slug) === selectedLocalKey,
+      ) ??
+      localHistory[0] ??
+      null,
+    [localHistory, selectedLocalKey],
+  );
 
   const installedByKey = useMemo(
     () =>
@@ -140,6 +168,22 @@ export function LibraryView() {
     }
   }, []);
 
+  const refreshInstalled = useCallback(async (reportError = false) => {
+    try {
+      setInstalled(await fetchInstalledPets());
+    } catch (error) {
+      console.error('Unable to read installed pets', error);
+      if (reportError) {
+        setNotice({
+          tone: 'error',
+          text: '暂时无法读取这台电脑上的伙伴与使用历史。',
+        });
+      }
+    } finally {
+      setInstalledLoading(false);
+    }
+  }, []);
+
   const refreshActivePet = useCallback(async (reportError = false) => {
     if (activePetMutation.current !== null) return;
     const request = ++activePetRequest.current;
@@ -179,17 +223,9 @@ export function LibraryView() {
 
   useEffect(() => {
     document.body.classList.add('library-mode');
-    void fetchInstalledPets()
-      .then(setInstalled)
-      .catch((error: unknown) => {
-        console.error('Unable to read installed pets', error);
-        setNotice({
-          tone: 'error',
-          text: '目录可以浏览，但暂时无法读取本地宠物库。',
-        });
-      });
+    void refreshInstalled(true);
     return () => document.body.classList.remove('library-mode');
-  }, []);
+  }, [refreshInstalled]);
 
   useEffect(() => {
     let disposed = false;
@@ -284,6 +320,34 @@ export function LibraryView() {
   }, [catalog, directSourceId]);
 
   useEffect(() => {
+    if (!localMode) return;
+    setSelectedLocalKey((current) => {
+      if (
+        current &&
+        localHistory.some(
+          (pet) => libraryPetKey(pet.source, pet.slug) === current,
+        )
+      ) {
+        return current;
+      }
+      const activeKey =
+        activePet?.reference.kind === 'installed'
+          ? activePetKey(activePet.reference)
+          : null;
+      if (
+        activeKey &&
+        localHistory.some(
+          (pet) => libraryPetKey(pet.source, pet.slug) === activeKey,
+        )
+      ) {
+        return activeKey;
+      }
+      const first = localHistory[0];
+      return first ? libraryPetKey(first.source, first.slug) : null;
+    });
+  }, [activePet?.reference, localHistory, localMode]);
+
+  useEffect(() => {
     setResultLimit(INITIAL_RESULT_LIMIT);
   }, [deferredQuery, onlyInstalled, sourceId]);
 
@@ -350,12 +414,25 @@ export function LibraryView() {
       directSourceId,
       selectedItem.slug,
     );
+  const selectedLocalIsActive =
+    selectedLocalPet !== null &&
+    activePet !== null &&
+    activePetMatchesInstalled(
+      activePet.reference,
+      selectedLocalPet.source,
+      selectedLocalPet.slug,
+    );
   const restoringDefault = switchingKey === DEFAULT_ACTIVE_PET_KEY;
   const selectedIsSwitching =
     (selectedItem !== null &&
       directSourceId !== null &&
       switchingKey === libraryPetKey(directSourceId, selectedItem.slug)) ||
     (restoringDefault && selectedIsActive);
+  const selectedLocalIsSwitching =
+    (selectedLocalPet !== null &&
+      switchingKey ===
+        libraryPetKey(selectedLocalPet.source, selectedLocalPet.slug)) ||
+    (restoringDefault && selectedLocalIsActive);
   const source = sourceById(sourceId);
   const visibleNotice =
     notice?.sourceId === undefined || notice.sourceId === sourceId
@@ -396,25 +473,26 @@ export function LibraryView() {
     }
   };
 
-  const activateSelected = async () => {
+  const activateInstalled = async (
+    pet: InstalledPet,
+    noticeSourceId?: LibrarySourceId,
+  ) => {
     if (
-      !selectedItem ||
-      !selectedInstalled ||
-      !directSourceId ||
       activePetMutation.current !== null ||
-      selectedIsActive
+      (activePet !== null &&
+        activePetMatchesInstalled(activePet.reference, pet.source, pet.slug))
     ) {
       return;
     }
 
-    const key = libraryPetKey(directSourceId, selectedItem.slug);
+    const key = libraryPetKey(pet.source, pet.slug);
     const previousName = activePetRef.current?.displayName ?? '原来的伙伴';
     const request = ++activePetRequest.current;
     activePetMutation.current = key;
     setSwitchingKey(key);
     setNotice(null);
     try {
-      const next = await setActivePet(directSourceId, selectedItem.slug);
+      const next = await setActivePet(pet.source, pet.slug);
       if (
         request !== activePetRequest.current ||
         activePetMutation.current !== key
@@ -426,9 +504,10 @@ export function LibraryView() {
       setActivePetLoading(false);
       setNotice({
         tone: 'status',
-        sourceId: directSourceId,
+        sourceId: noticeSourceId,
         text: `${next.displayName} 现在正在桌面陪伴你。`,
       });
+      void refreshInstalled();
     } catch (error) {
       if (
         request !== activePetRequest.current ||
@@ -438,8 +517,8 @@ export function LibraryView() {
       }
       setNotice({
         tone: 'error',
-        sourceId: directSourceId,
-        text: `没能把 ${selectedItem.displayName} 设为当前伙伴，${previousName} 仍在陪伴你。${errorMessage(error)}`,
+        sourceId: noticeSourceId,
+        text: `没能把 ${pet.displayName} 设为当前伙伴，${previousName} 仍在陪伴你。${errorMessage(error)}`,
       });
     } finally {
       if (
@@ -449,6 +528,42 @@ export function LibraryView() {
         activePetMutation.current = null;
         setSwitchingKey(null);
       }
+    }
+  };
+
+  const activateSelected = () => {
+    if (!selectedInstalled || !directSourceId || selectedIsActive) return;
+    return activateInstalled(selectedInstalled, directSourceId);
+  };
+
+  const importLocal = async () => {
+    if (importing || installingKey !== null || switchingKey !== null) return;
+    setImporting(true);
+    setNotice(null);
+    try {
+      const imported = await chooseAndImportLocalPet();
+      if (!imported) return;
+      setInstalled((current) => [
+        imported,
+        ...current.filter(
+          (pet) =>
+            libraryPetKey(pet.source, pet.slug) !==
+            libraryPetKey(imported.source, imported.slug),
+        ),
+      ]);
+      setSourceId('local');
+      setSelectedLocalKey(libraryPetKey(imported.source, imported.slug));
+      setNotice({
+        tone: 'status',
+        text: `${imported.displayName} 已导入“我的伙伴”，现在可以设为当前伙伴。`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: 'error',
+        text: `没有导入这只伙伴：${errorMessage(error)}`,
+      });
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -523,32 +638,47 @@ export function LibraryView() {
         </div>
         <div className="library-search-tools">
           <label className="library-search">
-            <span className="sr-only">搜索名字、描述或作者</span>
+            <span className="sr-only">
+              {localMode ? '搜索我的伙伴' : '搜索名字、描述或作者'}
+            </span>
             <input
               ref={searchRef}
               type="search"
               value={query}
-              placeholder="搜索名字、描述或作者"
-              disabled={directSourceId === null}
+              placeholder={
+                localMode ? '搜索我的伙伴' : '搜索名字、描述或作者'
+              }
+              disabled={!localMode && directSourceId === null}
               onChange={(event) => setQuery(event.target.value)}
             />
             <kbd>⌘ F</kbd>
           </label>
-          <label
-            className={
-              directSourceId !== null
-                ? 'library-installed-filter'
-                : 'library-installed-filter is-disabled'
-            }
-          >
-            <input
-              type="checkbox"
-              checked={onlyInstalled}
-              disabled={directSourceId === null}
-              onChange={(event) => setOnlyInstalled(event.target.checked)}
-            />
-            <span>只看已收藏</span>
-          </label>
+          {localMode ? (
+            <button
+              className="library-import-button"
+              type="button"
+              disabled={!isTauri || importing}
+              onClick={() => void importLocal()}
+            >
+              {importing ? '正在导入…' : '导入宠物'}
+            </button>
+          ) : (
+            <label
+              className={
+                directSourceId !== null
+                  ? 'library-installed-filter'
+                  : 'library-installed-filter is-disabled'
+              }
+            >
+              <input
+                type="checkbox"
+                checked={onlyInstalled}
+                disabled={directSourceId === null}
+                onChange={(event) => setOnlyInstalled(event.target.checked)}
+              />
+              <span>只看已收藏</span>
+            </label>
+          )}
         </div>
       </header>
 
@@ -582,7 +712,151 @@ export function LibraryView() {
           </div>
         </nav>
 
-        {directSourceId !== null ? (
+        {localMode ? (
+          <>
+            <section
+              className="library-catalog library-catalog--local"
+              aria-label="我的伙伴与使用历史"
+            >
+              <div className="library-catalog__heading">
+                <div>
+                  <h2>我的伙伴</h2>
+                  <p>
+                    {installedLoading
+                      ? '正在读取本地记录'
+                      : `${localHistory.length.toLocaleString('zh-CN')} 只 · 最近使用优先`}
+                  </p>
+                </div>
+                <span>不依赖商店</span>
+              </div>
+
+              {installedLoading ? (
+                <LibraryLoading label="正在翻阅本地伙伴记录…" />
+              ) : localHistory.length === 0 ? (
+                <LocalLibraryEmpty
+                  hasQuery={query.trim() !== ''}
+                  importing={importing}
+                  importAvailable={isTauri}
+                  onImport={() => void importLocal()}
+                />
+              ) : (
+                <div className="library-catalog__scroll">
+                  <ol className="library-pet-list">
+                    {localHistory.map((pet) => {
+                      const itemKey = libraryPetKey(pet.source, pet.slug);
+                      const current =
+                        activePet !== null &&
+                        activePetMatchesInstalled(
+                          activePet.reference,
+                          pet.source,
+                          pet.slug,
+                        );
+                      const switching =
+                        switchingKey === itemKey ||
+                        (restoringDefault && current);
+                      return (
+                        <li key={itemKey}>
+                          <button
+                            className={[
+                              'library-pet-row',
+                              selectedLocalPet &&
+                              libraryPetKey(
+                                selectedLocalPet.source,
+                                selectedLocalPet.slug,
+                              ) === itemKey
+                                ? 'is-selected'
+                                : '',
+                              current ? 'is-current' : '',
+                            ]
+                              .filter(Boolean)
+                              .join(' ')}
+                            type="button"
+                            aria-pressed={
+                              selectedLocalPet !== null &&
+                              libraryPetKey(
+                                selectedLocalPet.source,
+                                selectedLocalPet.slug,
+                              ) === itemKey
+                            }
+                            onClick={() => setSelectedLocalKey(itemKey)}
+                          >
+                            <PetPreview
+                              id={pet.slug}
+                              name={pet.displayName}
+                              source={pet.source}
+                              localSrc={installedSpriteUrl(pet)}
+                              localSpriteVersionNumber={pet.spriteVersionNumber}
+                              size={68}
+                            />
+                            <span className="library-pet-row__copy">
+                              <strong>{pet.displayName}</strong>
+                              <span>{installedPetSourceLabel(pet.source)}</span>
+                              <small>{historyLabel(pet)}</small>
+                            </span>
+                            <span
+                              className={
+                                switching
+                                  ? 'library-pet-row__state is-working'
+                                  : current
+                                    ? 'library-pet-row__state is-current'
+                                    : 'library-pet-row__state'
+                              }
+                            >
+                              {switching
+                                ? '切换中'
+                                : current
+                                  ? '正在陪伴'
+                                  : pet.lastUsedAtEpochSeconds
+                                    ? `用过 ${pet.useCount} 次`
+                                    : '未使用'}
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </div>
+              )}
+            </section>
+
+            <section className="library-detail" aria-live="polite">
+              {selectedLocalPet ? (
+                <LocalPetDetail
+                  key={libraryPetKey(
+                    selectedLocalPet.source,
+                    selectedLocalPet.slug,
+                  )}
+                  pet={selectedLocalPet}
+                  switching={selectedLocalIsSwitching}
+                  current={selectedLocalIsActive}
+                  activePetLoading={activePetLoading}
+                  libraryBusy={
+                    importing ||
+                    installingKey !== null ||
+                    switchingKey !== null
+                  }
+                  activePetName={activePet?.displayName ?? null}
+                  canRestoreDefault={activePet?.reference.kind === 'installed'}
+                  restoringDefault={restoringDefault}
+                  activationAvailable={isTauri}
+                  onActivate={() =>
+                    void activateInstalled(selectedLocalPet)
+                  }
+                  onRestoreDefault={restoreDefault}
+                  onOpenSource={
+                    selectedLocalPet.sourcePageUrl
+                      ? () => void openPage(selectedLocalPet.sourcePageUrl)
+                      : undefined
+                  }
+                />
+              ) : (
+                <div className="library-detail__empty">
+                  <p>导入或收藏一只伙伴后，它会一直留在这里。</p>
+                </div>
+              )}
+            </section>
+          </>
+        ) : directSourceId !== null ? (
           <>
             <section
               className="library-catalog"
@@ -759,6 +1033,9 @@ export function LibraryView() {
           <ExternalSourceView
             sourceId={sourceId}
             onOpen={() => void openPage(source.url)}
+            importing={importing}
+            importAvailable={isTauri}
+            onImport={() => void importLocal()}
           />
         )}
       </div>
@@ -774,10 +1051,206 @@ export function LibraryView() {
           role={visibleNotice?.tone === 'error' ? 'alert' : 'status'}
         >
           {visibleNotice?.text ??
-            '收藏不会自动换走当前伙伴；你可以在详情里决定谁来陪伴。'}
+            (localMode
+              ? '商店下架或离线不会影响这里的本地伙伴。'
+              : '收藏不会自动换走当前伙伴；你可以在详情里决定谁来陪伴。')}
         </p>
       </footer>
     </main>
+  );
+}
+
+interface LocalPetDetailProps {
+  pet: InstalledPet;
+  switching: boolean;
+  current: boolean;
+  activePetLoading: boolean;
+  libraryBusy: boolean;
+  activePetName: string | null;
+  canRestoreDefault: boolean;
+  restoringDefault: boolean;
+  activationAvailable: boolean;
+  onActivate: () => void;
+  onRestoreDefault: () => void;
+  onOpenSource?: () => void;
+}
+
+function LocalPetDetail({
+  pet,
+  switching,
+  current,
+  activePetLoading,
+  libraryBusy,
+  activePetName,
+  canRestoreDefault,
+  restoringDefault,
+  activationAvailable,
+  onActivate,
+  onRestoreDefault,
+  onOpenSource,
+}: LocalPetDetailProps) {
+  return (
+    <div className="library-detail__content">
+      <div className="library-preview-stage">
+        <PetPreview
+          id={pet.slug}
+          name={pet.displayName}
+          source={pet.source}
+          localSrc={installedSpriteUrl(pet)}
+          localSpriteVersionNumber={pet.spriteVersionNumber}
+          size={210}
+          animate
+          eager
+        />
+        {switching ? (
+          <span className="library-preview-stamp is-working">正在切换</span>
+        ) : current ? (
+          <span className="library-preview-stamp is-current">当前伙伴</span>
+        ) : (
+          <span className="library-preview-stamp">本地可用</span>
+        )}
+      </div>
+
+      <div className="library-detail__title">
+        <h2>{pet.displayName}</h2>
+        <p>{shortLocalId(pet.slug)}</p>
+      </div>
+
+      {pet.description ? (
+        <p className="library-detail__description">{pet.description}</p>
+      ) : null}
+
+      <dl className="library-detail__facts">
+        <div>
+          <dt>来源</dt>
+          <dd>{installedPetSourceLabel(pet.source)}</dd>
+        </div>
+        <div>
+          <dt>收藏于</dt>
+          <dd>{formatHistoryTime(pet.installedAtEpochSeconds)}</dd>
+        </div>
+        <div>
+          <dt>最近使用</dt>
+          <dd>
+            {pet.lastUsedAtEpochSeconds
+              ? `${formatHistoryTime(pet.lastUsedAtEpochSeconds)} · 共 ${pet.useCount} 次`
+              : '还没有设为桌面伙伴'}
+          </dd>
+        </div>
+      </dl>
+
+      <div className="library-detail__statuses" aria-label="本地伙伴状态">
+        <span>本地可恢复</span>
+        <span>格式已校验</span>
+      </div>
+
+      <button
+        className={[
+          'library-install-button',
+          switching ? 'is-working' : '',
+          current ? 'is-current' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        type="button"
+        disabled={
+          current ||
+          switching ||
+          libraryBusy ||
+          activePetLoading ||
+          !activationAvailable
+        }
+        onClick={onActivate}
+      >
+        {switching
+          ? restoringDefault
+            ? '正在换回默认伙伴…'
+            : '正在请它来到桌面…'
+          : current
+            ? '正在陪伴'
+            : libraryBusy
+              ? '正在处理另一只伙伴…'
+              : activePetLoading
+                ? '正在确认当前伙伴…'
+                : activationAvailable
+                  ? '设为当前伙伴'
+                  : '桌面版可更换伙伴'}
+      </button>
+      {switching ? (
+        <div className="library-install-progress" aria-hidden="true">
+          <span />
+        </div>
+      ) : null}
+      {canRestoreDefault ? (
+        <div className="library-active-companion">
+          <p>
+            <span>当前伙伴</span>
+            <strong>{activePetName}</strong>
+          </p>
+          <button
+            type="button"
+            disabled={libraryBusy || activePetLoading}
+            onClick={onRestoreDefault}
+          >
+            {restoringDefault
+              ? '正在请 Frieren 回来…'
+              : '换回 Frieren（默认伙伴）'}
+          </button>
+        </div>
+      ) : null}
+      {onOpenSource ? (
+        <button
+          className="library-source-link"
+          type="button"
+          onClick={onOpenSource}
+        >
+          查看原始来源 <span aria-hidden="true">↗</span>
+        </button>
+      ) : null}
+
+      <p className="library-safety-note">
+        <span aria-hidden="true">◆</span>
+        伙伴保存在本机；即使远端目录下架或离线，也可以从这里再次使用。
+      </p>
+      <p className="library-rights-note">
+        {pet.source === 'imported'
+          ? '导入只会复制并校验 pet.json 与同目录图集，不会执行脚本。请自行确认素材使用权。'
+          : '本地收藏不等于获得角色素材的再分发、公开展示或商用授权。'}
+      </p>
+    </div>
+  );
+}
+
+function LocalLibraryEmpty({
+  hasQuery,
+  importing,
+  importAvailable,
+  onImport,
+}: {
+  hasQuery: boolean;
+  importing: boolean;
+  importAvailable: boolean;
+  onImport: () => void;
+}) {
+  return (
+    <div className="library-empty library-empty--local">
+      <span aria-hidden="true">◇</span>
+      <h3>{hasQuery ? '没有找到本地伙伴' : '把下载的伙伴带回 PetX'}</h3>
+      <p>
+        {hasQuery
+          ? '换个名字、来源或描述再找找。'
+          : '选择解压后宠物文件夹里的 pet.json；图集会在本机校验后复制进宠物库。'}
+      </p>
+      {!hasQuery ? (
+        <button
+          type="button"
+          disabled={!importAvailable || importing}
+          onClick={onImport}
+        >
+          {importing ? '正在导入…' : '选择 pet.json'}
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -983,9 +1456,15 @@ function PetDetail({
 function ExternalSourceView({
   sourceId,
   onOpen,
+  importing,
+  importAvailable,
+  onImport,
 }: {
   sourceId: LibrarySourceId;
   onOpen: () => void;
+  importing: boolean;
+  importAvailable: boolean;
+  onImport: () => void;
 }) {
   const source = sourceById(sourceId);
   return (
@@ -1005,15 +1484,26 @@ function ExternalSourceView({
             <li key={constraint}>{constraint}</li>
           ))}
         </ul>
-        <button type="button" onClick={onOpen}>
-          在 {source.name} 浏览 <span aria-hidden="true">↗</span>
-        </button>
+        <div className="library-external__actions">
+          <button type="button" onClick={onOpen}>
+            在 {source.name} 浏览 <span aria-hidden="true">↗</span>
+          </button>
+          <button
+            className="is-secondary"
+            type="button"
+            disabled={!importAvailable || importing}
+            onClick={onImport}
+          >
+            {importing ? '正在导入…' : '导入已下载的宠物'}
+          </button>
+        </div>
       </div>
       <aside>
         <p>为什么不直接下载？</p>
-        <strong>平台负责账号、许可或客户端流程。</strong>
+        <strong>平台负责账号、许可或购买流程。</strong>
         <span>
-          PetX 不会抓取隐藏链接、复用登录 Cookie，或绕过购买与订阅。
+          PetX 不会绕过这些限制。取得兼容包后，解压并选择其中的
+          pet.json 即可导入。
         </span>
       </aside>
     </section>
@@ -1092,10 +1582,37 @@ function kindLabel(kind: string) {
   return kind || '动画伙伴';
 }
 
+function historyLabel(pet: InstalledPet) {
+  return pet.lastUsedAtEpochSeconds
+    ? `最近使用 ${formatHistoryTime(pet.lastUsedAtEpochSeconds)}`
+    : `收藏于 ${formatHistoryTime(pet.installedAtEpochSeconds)}`;
+}
+
+function formatHistoryTime(epochSeconds: number) {
+  const date = new Date(epochSeconds * 1_000);
+  if (!Number.isFinite(epochSeconds) || Number.isNaN(date.getTime())) {
+    return '时间未知';
+  }
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: date.getFullYear() === new Date().getFullYear() ? undefined : 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+}
+
+function shortLocalId(slug: string) {
+  return slug.startsWith('local-') ? `本地 ${slug.slice(6, 14)}` : slug;
+}
+
 function catalogStatus(
   catalog: CatalogResponse | null,
   sourceId: LibrarySourceId,
 ) {
+  if (sourceId === 'local') {
+    return '本地伙伴与使用历史';
+  }
   if (!isDirectLibrarySource(sourceId)) {
     return '外部来源会交给系统浏览器打开';
   }

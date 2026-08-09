@@ -40,7 +40,7 @@ const MAX_DECODE_ALLOCATION_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PREVIEW_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PREVIEW_CACHE_ENTRIES: usize = 160;
 const MAX_PARALLEL_IMAGE_JOBS: usize = 2;
-const EXPECTED_FIELDS: [&str; 7] = [
+const LEGACY_FIELDS: [&str; 7] = [
     "slug",
     "displayName",
     "kind",
@@ -48,6 +48,16 @@ const EXPECTED_FIELDS: [&str; 7] = [
     "spritesheet",
     "petJson",
     "zip",
+];
+const CURRENT_FIELDS: [&str; 8] = [
+    "slug",
+    "displayName",
+    "kind",
+    "submittedBy",
+    "spritesheet",
+    "petJson",
+    "zip",
+    "spriteVersionNumber",
 ];
 
 #[derive(Clone, Copy)]
@@ -177,7 +187,7 @@ pub async fn get_petdex_preview(
     let item = manifest
         .pets
         .iter()
-        .find(|item| item.0 == slug)
+        .find(|item| compact_item_slug(item) == Some(slug.as_str()))
         .cloned()
         .ok_or_else(|| "目录里已经找不到这只宠物，请刷新后再试。".to_string())?;
     let catalog_item = compact_item_to_catalog(&manifest.asset_base, item)?;
@@ -235,12 +245,16 @@ pub async fn get_petshare_preview(
 #[tauri::command]
 pub fn list_installed_pets(app: AppHandle) -> Result<Vec<InstalledPet>, String> {
     let root = pets_root(&app)?;
+    list_installed_pets_at(&root)
+}
+
+fn list_installed_pets_at(root: &Path) -> Result<Vec<InstalledPet>, String> {
     if !root.exists() {
         return Ok(Vec::new());
     }
 
     let mut installed = Vec::new();
-    let entries = fs::read_dir(&root)
+    let entries = fs::read_dir(root)
         .map_err(|error| format!("无法读取本地宠物库 {}：{error}", root.display()))?;
     for entry in entries {
         let entry = match entry {
@@ -260,8 +274,107 @@ pub fn list_installed_pets(app: AppHandle) -> Result<Vec<InstalledPet>, String> 
         }
     }
 
-    installed.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    installed.sort_by(|left, right| {
+        right
+            .last_used_at_epoch_seconds
+            .unwrap_or(0)
+            .cmp(&left.last_used_at_epoch_seconds.unwrap_or(0))
+            .then_with(|| {
+                right
+                    .installed_at_epoch_seconds
+                    .cmp(&left.installed_at_epoch_seconds)
+            })
+            .then_with(|| left.display_name.cmp(&right.display_name))
+    });
     Ok(installed)
+}
+
+#[tauri::command]
+pub fn import_local_pet(app: AppHandle, manifest_path: String) -> Result<InstalledPet, String> {
+    if manifest_path.trim().is_empty() {
+        return Err("没有选择宠物清单。".to_string());
+    }
+    let data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法定位 PetX 本地宠物库：{error}"))?;
+    import_local_pet_at(&data_root, Path::new(&manifest_path))
+}
+
+fn import_local_pet_at(data_root: &Path, manifest_path: &Path) -> Result<InstalledPet, String> {
+    if manifest_path.file_name().and_then(|name| name.to_str()) != Some("pet.json") {
+        return Err("请选择解压后宠物文件夹里的 pet.json。".to_string());
+    }
+    let manifest_bytes =
+        read_limited_local_file(manifest_path, MAX_PET_JSON_BYTES, "导入的宠物清单")?;
+    let mut manifest: PetManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("导入的 pet.json 不是有效 JSON：{error}"))?;
+    validate_pet_manifest(&manifest)?;
+    let package_root = manifest_path
+        .parent()
+        .ok_or_else(|| "导入的宠物清单路径无效。".to_string())?;
+    let sprite_path = package_root.join(&manifest.spritesheet_path);
+    let spritesheet_bytes =
+        read_limited_local_file(&sprite_path, MAX_SPRITESHEET_BYTES, "导入的宠物图集")?;
+    validate_spritesheet(&spritesheet_bytes, &manifest)?;
+
+    let sha256 = format!("{:x}", Sha256::digest(&spritesheet_bytes));
+    let mut package_hasher = Sha256::new();
+    package_hasher.update(&manifest_bytes);
+    package_hasher.update(&spritesheet_bytes);
+    let slug = format!("local-{:x}", package_hasher.finalize());
+    validate_slug(&slug)?;
+    manifest.id = slug.clone();
+
+    let installed_at_epoch_seconds = now_epoch_seconds()?;
+    let installation = InstallationRecord {
+        source: "imported".to_string(),
+        remote_id: slug.clone(),
+        display_name: Some(manifest.display_name.clone()),
+        submitted_by: None,
+        source_page_url: String::new(),
+        manifest_generated_at: String::new(),
+        installed_at_epoch_seconds,
+        last_used_at_epoch_seconds: None,
+        use_count: 0,
+        sha256,
+    };
+
+    let root = data_root.join("pets");
+    let target = root.join(source_scoped_key("imported", &slug));
+    if target.exists() {
+        let installed = read_installed_pet(&target)?;
+        if installed.source == "imported" && installed.slug == slug {
+            return Ok(installed);
+        }
+        return Err("同一导入身份与现有本地伙伴冲突。".to_string());
+    }
+
+    let staging_root = root.join(".staging");
+    fs::create_dir_all(&staging_root)
+        .map_err(|error| format!("无法创建宠物库暂存目录：{error}"))?;
+    let staging = staging_root.join(format!(
+        "imported-{}-{}-{}",
+        std::process::id(),
+        installed_at_epoch_seconds,
+        now_epoch_nanos()?
+    ));
+    fs::create_dir(&staging).map_err(|error| format!("无法准备导入目录：{error}"))?;
+    if let Err(error) = write_staged_pet(&staging, &manifest, &installation, &spritesheet_bytes) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&staging, &target) {
+        let _ = fs::remove_dir_all(&staging);
+        if target.exists() {
+            let installed = read_installed_pet(&target)?;
+            if installed.source == "imported" && installed.slug == slug {
+                return Ok(installed);
+            }
+        }
+        return Err(format!("无法把导入的宠物收进本地库：{error}"));
+    }
+    read_installed_pet(&target)
 }
 
 #[tauri::command]
@@ -287,7 +400,7 @@ pub async fn install_petdex_pet(
     let item = manifest
         .pets
         .iter()
-        .find(|item| item.0 == slug)
+        .find(|item| compact_item_slug(item) == Some(slug.as_str()))
         .cloned()
         .ok_or_else(|| "目录里已经找不到这只宠物，请刷新后再试。".to_string())?;
     let catalog_item = compact_item_to_catalog(&manifest.asset_base, item)?;
@@ -385,6 +498,8 @@ async fn install_catalog_pet(
         source_page_url: catalog_item.source_page_url.clone(),
         manifest_generated_at,
         installed_at_epoch_seconds,
+        last_used_at_epoch_seconds: None,
+        use_count: 0,
         sha256,
     };
 
@@ -502,40 +617,42 @@ fn persist_catalog_cache(cache_path: &Path, bytes: &[u8], source: &str) {
 }
 
 fn write_catalog_cache(cache_path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = cache_path
-        .parent()
-        .ok_or_else(|| "目录缓存路径无效。".to_string())?;
-    let file_name = cache_path
+    write_atomic_file(cache_path, bytes, "目录缓存")
+}
+
+fn write_atomic_file(path: &Path, bytes: &[u8], label: &str) -> Result<(), String> {
+    let parent = path.parent().ok_or_else(|| format!("{label}路径无效。"))?;
+    let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| "目录缓存文件名无效。".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| format!("无法创建目录缓存：{error}"))?;
+        .ok_or_else(|| format!("{label}文件名无效。"))?;
+    fs::create_dir_all(parent).map_err(|error| format!("无法创建{label}目录：{error}"))?;
 
     let nonce = now_epoch_nanos()?;
     let temporary = parent.join(format!(".{file_name}-{}-{nonce}.tmp", std::process::id()));
     let backup = parent.join(format!(".{file_name}-{}-{nonce}.bak", std::process::id()));
-    fs::write(&temporary, bytes).map_err(|error| format!("无法暂存目录缓存：{error}"))?;
+    fs::write(&temporary, bytes).map_err(|error| format!("无法暂存{label}：{error}"))?;
 
-    if fs::rename(&temporary, cache_path).is_ok() {
+    if fs::rename(&temporary, path).is_ok() {
         return Ok(());
     }
 
-    if cache_path.exists() && fs::rename(cache_path, &backup).is_ok() {
-        match fs::rename(&temporary, cache_path) {
+    if path.exists() && fs::rename(path, &backup).is_ok() {
+        match fs::rename(&temporary, path) {
             Ok(()) => {
                 let _ = fs::remove_file(&backup);
                 return Ok(());
             }
             Err(error) => {
-                let _ = fs::rename(&backup, cache_path);
+                let _ = fs::rename(&backup, path);
                 let _ = fs::remove_file(&temporary);
-                return Err(format!("无法替换目录缓存：{error}"));
+                return Err(format!("无法替换{label}：{error}"));
             }
         }
     }
 
     let _ = fs::remove_file(&temporary);
-    Err("无法替换目录缓存。".to_string())
+    Err(format!("无法替换{label}。"))
 }
 
 fn parse_manifest(bytes: &[u8]) -> Result<CompactManifest, String> {
@@ -550,11 +667,15 @@ fn parse_manifest(bytes: &[u8]) -> Result<CompactManifest, String> {
     if manifest.asset_base != ASSET_BASE {
         return Err("Petdex 目录使用了未受信任的素材域名。".to_string());
     }
-    if manifest.fields != EXPECTED_FIELDS {
+    if manifest.fields != LEGACY_FIELDS && manifest.fields != CURRENT_FIELDS {
         return Err("Petdex 目录字段发生了不兼容变化。".to_string());
     }
     if manifest.total != manifest.pets.len() {
         return Err("Petdex 目录条目数量不一致。".to_string());
+    }
+    let expected_item_length = manifest.fields.len();
+    for item in &manifest.pets {
+        validate_compact_item(item, expected_item_length)?;
     }
     Ok(manifest)
 }
@@ -580,7 +701,17 @@ fn compact_item_to_catalog(
     asset_base: &str,
     item: model::CompactManifestPet,
 ) -> Result<CatalogItem, String> {
-    let (slug, display_name, kind, submitted_by, spritesheet, pet_json, _) = item;
+    validate_compact_item(&item, item.len())?;
+    let slug = compact_string(&item, 0, "slug")?;
+    let display_name = compact_string(&item, 1, "displayName")?;
+    let kind = compact_string(&item, 2, "kind")?;
+    let submitted_by = match item.get(3) {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => Some(value.clone()),
+        _ => return Err("Petdex 目录的 submittedBy 字段无效。".to_string()),
+    };
+    let spritesheet = compact_string(&item, 4, "spritesheet")?;
+    let pet_json = compact_string(&item, 5, "petJson")?;
     validate_slug(&slug)?;
     if display_name.trim().is_empty() || display_name.chars().count() > 120 {
         return Err(format!("目录条目 {slug} 的名称无效。"));
@@ -597,6 +728,51 @@ fn compact_item_to_catalog(
         spritesheet_url,
         pet_json_url,
     })
+}
+
+fn compact_item_slug(item: &model::CompactManifestPet) -> Option<&str> {
+    item.first().and_then(serde_json::Value::as_str)
+}
+
+fn compact_string(
+    item: &model::CompactManifestPet,
+    index: usize,
+    field: &str,
+) -> Result<String, String> {
+    item.get(index)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("Petdex 目录的 {field} 字段无效。"))
+}
+
+fn validate_compact_item(
+    item: &model::CompactManifestPet,
+    expected_length: usize,
+) -> Result<(), String> {
+    if !matches!(expected_length, 7 | 8) || item.len() != expected_length {
+        return Err("Petdex 目录条目的字段数量无效。".to_string());
+    }
+    for index in [0_usize, 1, 2, 4, 5, 6] {
+        if item
+            .get(index)
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        {
+            return Err("Petdex 目录条目包含无效文本字段。".to_string());
+        }
+    }
+    if !matches!(
+        item.get(3),
+        Some(serde_json::Value::Null | serde_json::Value::String(_))
+    ) {
+        return Err("Petdex 目录的 submittedBy 字段无效。".to_string());
+    }
+    if expected_length == 8
+        && !matches!(item.get(7).and_then(serde_json::Value::as_u64), Some(1 | 2))
+    {
+        return Err("Petdex 目录的 spriteVersionNumber 字段无效。".to_string());
+    }
+    Ok(())
 }
 
 fn parse_petshare_manifest(bytes: &[u8]) -> Result<PetshareManifest, String> {
@@ -1184,6 +1360,14 @@ fn read_installed_pet(directory: &Path) -> Result<InstalledPet, String> {
             .map_err(|error| format!("无法读取 {}：{error}", installation_path.display()))?,
     )
     .map_err(|error| format!("本地来源记录无效：{error}"))?;
+    if !matches!(
+        installation.source.as_str(),
+        "petdex" | "petshare" | "imported"
+    ) || validate_slug(&installation.remote_id).is_err()
+        || manifest.id != installation.remote_id
+    {
+        return Err("本地宠物清单、来源记录与安装目录不一致。".to_string());
+    }
     let sprite_path = directory.join(&manifest.spritesheet_path);
     if !sprite_path.is_file() {
         return Err("本地宠物图集已经丢失。".to_string());
@@ -1198,8 +1382,49 @@ fn read_installed_pet(directory: &Path) -> Result<InstalledPet, String> {
         source_page_url: installation.source_page_url,
         sprite_version_number: manifest.sprite_version_number.unwrap_or(1),
         installed_at_epoch_seconds: installation.installed_at_epoch_seconds,
+        last_used_at_epoch_seconds: installation.last_used_at_epoch_seconds,
+        use_count: installation.use_count,
         sha256: installation.sha256,
     })
+}
+
+pub(super) fn record_installed_pet_usage(
+    data_root: &Path,
+    source: &str,
+    slug: &str,
+) -> Result<(), String> {
+    validate_slug(slug)?;
+    let root = data_root.join("pets");
+    let scoped = root.join(source_scoped_key(source, slug));
+    let directory = if scoped.is_dir() {
+        scoped
+    } else if source == "petdex" && root.join(slug).is_dir() {
+        root.join(slug)
+    } else {
+        return Err("无法在本地宠物库里记录这次陪伴。".to_string());
+    };
+    let installation_path = directory.join("installation.json");
+    let bytes =
+        read_limited_local_file(&installation_path, MAX_PET_JSON_BYTES, "本地宠物来源记录")?;
+    let mut installation: InstallationRecord =
+        serde_json::from_slice(&bytes).map_err(|error| format!("本地来源记录无效：{error}"))?;
+    if installation.source != source || installation.remote_id != slug {
+        return Err("本地宠物来源记录与所选身份不一致。".to_string());
+    }
+    installation.last_used_at_epoch_seconds = Some(now_epoch_seconds()?);
+    installation.use_count = installation.use_count.saturating_add(1);
+    let updated = serde_json::to_vec_pretty(&installation)
+        .map_err(|error| format!("无法整理宠物使用历史：{error}"))?;
+    write_atomic_file(&installation_path, &updated, "宠物使用历史")
+}
+
+fn read_limited_local_file(path: &Path, maximum: usize, label: &str) -> Result<Vec<u8>, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("无法读取{label} {}：{error}", path.display()))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > maximum as u64 {
+        return Err(format!("{label}不存在、为空或超过安全大小限制。"));
+    }
+    fs::read(path).map_err(|error| format!("无法读取{label} {}：{error}", path.display()))
 }
 
 fn pets_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1258,6 +1483,73 @@ fn source_scoped_key(source: &str, slug: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_petdex_v2_manifest_accepts_sprite_version_field() {
+        let bytes = br#"{
+          "v": 2,
+          "generatedAt": "2026-08-09T12:33:27.295Z",
+          "total": 1,
+          "assetBase": "https://assets.petdex.dev",
+          "fields": [
+            "slug", "displayName", "kind", "submittedBy",
+            "spritesheet", "petJson", "zip", "spriteVersionNumber"
+          ],
+          "pets": [[
+            "homelander", "Homelander", "character", "Serhat",
+            "pets/homelander-dbbb6a60a484/sprite.webp",
+            "pets/homelander-dbbb6a60a484/petjson.json",
+            "pets/homelander-dbbb6a60a484/zip.zip", 1
+          ]]
+        }"#;
+
+        let response = catalog_response(parse_manifest(bytes).unwrap(), false).unwrap();
+
+        assert_eq!(response.total, 1);
+        assert_eq!(response.items[0].slug, "homelander");
+        assert_eq!(response.items[0].display_name, "Homelander");
+    }
+
+    #[test]
+    fn imports_a_valid_local_package_into_catalog_independent_history() {
+        let root = std::env::temp_dir().join(format!(
+            "petx-local-import-{}-{}",
+            std::process::id(),
+            now_epoch_nanos().unwrap()
+        ));
+        let package = root.join("downloaded-package");
+        let data_root = root.join("app-data");
+        fs::create_dir_all(&package).unwrap();
+        let image = image::DynamicImage::new_rgba8(1536, 1872);
+        let mut encoded = Cursor::new(Vec::new());
+        image
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        fs::write(package.join("spritesheet.png"), encoded.into_inner()).unwrap();
+        fs::write(
+            package.join("pet.json"),
+            br#"{
+              "id": "downloaded-friend",
+              "displayName": "Downloaded Friend",
+              "description": "A package the user downloaded themselves.",
+              "spriteVersionNumber": 1,
+              "spritesheetPath": "spritesheet.png"
+            }"#,
+        )
+        .unwrap();
+
+        let imported = import_local_pet_at(&data_root, &package.join("pet.json")).unwrap();
+        let history = list_installed_pets_at(&data_root.join("pets")).unwrap();
+
+        assert_eq!(imported.source, "imported");
+        assert!(imported.slug.starts_with("local-"));
+        assert_eq!(imported.display_name, "Downloaded Friend");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].slug, imported.slug);
+        assert_eq!(history[0].last_used_at_epoch_seconds, None);
+        assert_eq!(history[0].use_count, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn accepts_safe_petdex_asset_urls() {
@@ -1577,6 +1869,8 @@ mod tests {
             source_page_url: "https://petshare.idevlab.dev/".to_string(),
             sprite_version_number: 2,
             installed_at_epoch_seconds: 1,
+            last_used_at_epoch_seconds: None,
+            use_count: 0,
             sha256: "a".repeat(64),
         };
 

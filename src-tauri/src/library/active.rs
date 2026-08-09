@@ -64,6 +64,7 @@ fn parse_source(source: &str) -> Result<ActivePetSource, String> {
     match source {
         "petdex" => Ok(ActivePetSource::Petdex),
         "petshare" => Ok(ActivePetSource::Petshare),
+        "imported" => Ok(ActivePetSource::Imported),
         _ => Err("当前宠物来源不受支持。".to_string()),
     }
 }
@@ -113,6 +114,9 @@ fn set_active_pet_at(
         slug: slug.to_string(),
     };
     write_active_ref(&active_pet_path(data_root), &reference)?;
+    if let Err(error) = super::record_installed_pet_usage(data_root, source.as_str(), slug) {
+        eprintln!("failed to record companion usage history: {error}");
+    }
     Ok(resolved)
 }
 
@@ -364,6 +368,28 @@ mod tests {
     }
 
     #[test]
+    fn imported_companion_activation_updates_usage_history() {
+        let root = test_root("imported-history");
+        let directory = write_installed_fixture(
+            &root,
+            ActivePetSource::Imported,
+            "local-history",
+            "Local History",
+        );
+
+        set_active_pet_at(&root, ActivePetSource::Imported, "local-history").unwrap();
+        set_active_pet_at(&root, ActivePetSource::Imported, "local-history").unwrap();
+
+        let installation: InstallationRecord =
+            serde_json::from_slice(&fs::read(directory.join("installation.json")).unwrap())
+                .unwrap();
+        assert_eq!(installation.source, "imported");
+        assert_eq!(installation.use_count, 2);
+        assert!(installation.last_used_at_epoch_seconds.is_some());
+        cleanup(&root);
+    }
+
+    #[test]
     fn unavailable_or_damaged_active_install_falls_back_and_repairs_the_record() {
         let root = test_root("fallback");
         write_active_ref(
@@ -476,6 +502,7 @@ mod tests {
         let (version, extension, format) = match source {
             ActivePetSource::Petdex => (1, "png", image::ImageFormat::Png),
             ActivePetSource::Petshare => (2, "webp", image::ImageFormat::WebP),
+            ActivePetSource::Imported => (2, "webp", image::ImageFormat::WebP),
         };
         let dimensions = super::super::expected_dimensions(Some(version));
         let image = DynamicImage::new_rgba8(dimensions.0, dimensions.1);
@@ -502,6 +529,8 @@ mod tests {
             source_page_url: "https://example.invalid/pet".to_string(),
             manifest_generated_at: "test".to_string(),
             installed_at_epoch_seconds: 1,
+            last_used_at_epoch_seconds: None,
+            use_count: 0,
             sha256,
         };
         fs::write(

@@ -1,4 +1,5 @@
 export type LibrarySourceId =
+  | 'local'
   | 'petdex'
   | 'petshare'
   | 'github'
@@ -9,7 +10,7 @@ export type LibrarySourceId =
 export interface LibrarySource {
   id: LibrarySourceId;
   name: string;
-  capability: 'direct' | 'browse-only';
+  capability: 'local' | 'direct' | 'browse-only';
   url: string;
   shortNote: string;
   description: string;
@@ -35,7 +36,7 @@ export interface CatalogResponse {
 }
 
 export interface InstalledPet {
-  source: DirectLibrarySourceId;
+  source: InstalledPetSourceId;
   slug: string;
   displayName: string;
   description: string | null;
@@ -44,6 +45,8 @@ export interface InstalledPet {
   sourcePageUrl: string;
   spriteVersionNumber: number;
   installedAtEpochSeconds: number;
+  lastUsedAtEpochSeconds: number | null;
+  useCount: number;
   sha256: string;
 }
 
@@ -51,6 +54,8 @@ export type DirectLibrarySourceId = Extract<
   LibrarySourceId,
   'petdex' | 'petshare'
 >;
+
+export type InstalledPetSourceId = DirectLibrarySourceId | 'imported';
 
 export const BUILTIN_PET_ID = 'frieren' as const;
 export const BUILTIN_PET_MANIFEST_URL = '/pets/frieren/pet.json';
@@ -62,7 +67,7 @@ export type ActivePetRef =
     }
   | {
       kind: 'installed';
-      source: DirectLibrarySourceId;
+      source: InstalledPetSourceId;
       slug: string;
     };
 
@@ -87,6 +92,15 @@ export const DEFAULT_ACTIVE_PET: ResolvedActivePet = {
 };
 
 export const LIBRARY_SOURCES: readonly LibrarySource[] = [
+  {
+    id: 'local',
+    name: '我的伙伴',
+    capability: 'local',
+    url: '',
+    shortNote: '历史与导入',
+    description: '保存在这台电脑上的伙伴，不依赖远端商店目录。',
+    constraints: [],
+  },
   {
     id: 'petdex',
     name: 'Petdex',
@@ -178,13 +192,13 @@ export function sourceById(id: LibrarySourceId): LibrarySource {
 }
 
 export function isDirectLibrarySource(
-  id: LibrarySourceId,
+  id: LibrarySourceId | InstalledPetSourceId,
 ): id is DirectLibrarySourceId {
   return id === 'petdex' || id === 'petshare';
 }
 
 export function libraryPetKey(
-  source: DirectLibrarySourceId,
+  source: InstalledPetSourceId,
   slug: string,
 ) {
   return `${source}:${slug}`;
@@ -205,7 +219,7 @@ export function isSameActivePetReference(
 
 export function activePetMatchesInstalled(
   reference: ActivePetRef,
-  source: DirectLibrarySourceId,
+  source: InstalledPetSourceId,
   slug: string,
 ): boolean {
   return reference.kind === 'installed' &&
@@ -219,8 +233,28 @@ export function activePetDisplayDescriptor(pet: ResolvedActivePet) {
     sourceLabel:
       pet.reference.kind === 'builtin'
         ? '内置伙伴'
-        : sourceById(pet.reference.source).name,
+        : installedPetSourceLabel(pet.reference.source),
   };
+}
+
+export function installedPetSourceLabel(source: InstalledPetSourceId) {
+  if (source === 'imported') return '用户导入';
+  return sourceById(source).name;
+}
+
+export function sortInstalledPetsByHistory(
+  installed: readonly InstalledPet[],
+): InstalledPet[] {
+  return [...installed].sort((left, right) => {
+    const lastUsedDifference =
+      (right.lastUsedAtEpochSeconds ?? 0) -
+      (left.lastUsedAtEpochSeconds ?? 0);
+    if (lastUsedDifference !== 0) return lastUsedDifference;
+    const installedDifference =
+      right.installedAtEpochSeconds - left.installedAtEpochSeconds;
+    if (installedDifference !== 0) return installedDifference;
+    return left.displayName.localeCompare(right.displayName, 'zh-CN');
+  });
 }
 
 export function parseActivePetReference(value: unknown): ActivePetRef {
@@ -290,8 +324,8 @@ export function parseResolvedActivePet(value: unknown): ResolvedActivePet {
 
 function isDirectLibrarySourceValue(
   value: unknown,
-): value is DirectLibrarySourceId {
-  return value === 'petdex' || value === 'petshare';
+): value is InstalledPetSourceId {
+  return value === 'petdex' || value === 'petshare' || value === 'imported';
 }
 
 function isValidInstalledSlug(value: unknown): value is string {

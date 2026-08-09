@@ -4,14 +4,17 @@ import {
   fetchCatalogPreview,
   type ResolvedPetPreview,
 } from './client';
-import type { DirectLibrarySourceId } from './model';
+import {
+  isDirectLibrarySource,
+  type InstalledPetSourceId,
+} from './model';
 
 interface PetPreviewProps {
   id: string;
   name: string;
   localSrc?: string;
   localSpriteVersionNumber?: number;
-  source: DirectLibrarySourceId;
+  source: InstalledPetSourceId;
   catalogSrc?: string;
   catalogManifestSrc?: string;
   size: number;
@@ -80,6 +83,11 @@ export function PetPreview({
       return;
     }
     if (!catalogSrc || !catalogManifestSrc) {
+      setFailed(true);
+      onError?.();
+      return;
+    }
+    if (!isDirectLibrarySource(source)) {
       setFailed(true);
       onError?.();
       return;

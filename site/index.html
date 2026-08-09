@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f4efe3" />
+    <meta
+      name="description"
+      content="PetX Desktop 是一只住在桌面上的、本地优先的伙伴。没有打卡、掉级或离线惩罚。"
+    />
+    <meta property="og:title" content="PetX Desktop · 一只住在桌面上的伙伴" />
+    <meta
+      property="og:description"
+      content="本地优先，不打卡、不掉级，也不会因为离线失去关系。"
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://ichendev.github.io/petx-desktop/" />
+    <meta
+      property="og:image"
+      content="https://ichendev.github.io/petx-desktop/assets/screenshots/companion-greeting.png"
+    />
+    <link rel="canonical" href="https://ichendev.github.io/petx-desktop/" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" sizes="any" />
+    <link rel="icon" href="./favicon-32.png" type="image/png" sizes="32x32" />
+    <link rel="stylesheet" href="./styles.css" />
+    <title>PetX Desktop · 一只住在桌面上的伙伴</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳至主要内容</a>
+
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="./" aria-label="PetX Desktop 首页">
+          <span>PetX Desktop</span>
+        </a>
+
+        <nav class="nav-links" aria-label="主要导航">
+          <a href="#companionship">相处</a>
+          <a href="#memory">记忆</a>
+          <a href="#privacy">安心</a>
+        </nav>
+
+        <a class="button button--small button--outline" href="https://github.com/IchenDEV/petx-desktop">
+          查看 GitHub
+          <svg class="external-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path d="M5 11 11 5M6 5h5v5" />
+          </svg>
+        </a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero shell" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <h1 id="hero-title">一只住在<br />桌面上的伙伴。</h1>
+          <p class="hero-lead">本地优先，不打卡、不掉级，<br />也不会因为离线失去关系。</p>
+          <div class="hero-actions">
+            <a class="button button--primary" href="https://github.com/IchenDEV/petx-desktop">
+              查看 GitHub
+              <svg class="external-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path d="M5 11 11 5M6 5h5v5" />
+              </svg>
+            </a>
+            <a class="button button--outline" href="#run">本地运行</a>
+          </div>
+        </div>
+
+        <figure class="hero-figure">
+          <div class="screenshot-frame screenshot-frame--hero">
+            <img
+              src="./assets/screenshots/companion-greeting.png"
+              width="448"
+              height="356"
+              alt="Frieren 在 PetX Desktop 欢迎气泡中询问“这里可以待一会吗？”"
+              fetchpriority="high"
+              decoding="async"
+            />
+          </div>
+          <figcaption>初次见面的欢迎气泡</figcaption>
+        </figure>
+      </section>
+
+      <section id="companionship" class="section section--care" aria-labelledby="companionship-title">
+        <div class="shell story-grid">
+          <div class="story-copy">
+            <h2 id="companionship-title">陪伴，<br />不是任务</h2>
+            <span class="title-rule" aria-hidden="true"></span>
+            <p>
+              摸摸、玩一会、分一点点心，关系会在共同度过的日子里自然变化。没有签到、经验条或惩罚。
+            </p>
+            <dl class="feature-notes">
+              <div>
+                <dt>会回应，也会安静</dt>
+                <dd>单击问候、双击玩耍，也可以设置安静时段或安静一小时。</dd>
+              </div>
+              <div>
+                <dt>照料不是生存维护</dt>
+                <dd>状态帮你理解伙伴当下的感受，不会变成催促你的倒计时。</dd>
+              </div>
+            </dl>
+          </div>
+
+          <figure class="screenshot-figure screenshot-figure--care">
+            <div class="screenshot-frame">
+              <img
+                src="./assets/screenshots/care-panel.png"
+                width="500"
+                height="356"
+                alt="PetX Desktop 的照料面板，显示 Frieren 的饱足、精力和心情状态"
+                loading="lazy"
+                decoding="async"
+              />
+            </div>
+            <figcaption><strong>今天的相处</strong> · 照料是一段互动，不是生存维护。</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section id="memory" class="section section--memory" aria-labelledby="memory-title">
+        <div class="shell story-grid story-grid--memory">
+          <div class="story-copy">
+            <h2 id="memory-title">它会记得你</h2>
+            <span class="title-rule" aria-hidden="true"></span>
+            <p>
+              昵称、关系阶段和最多 7 段共同记忆只保存在本机。每次问候、玩耍和平常的一天，都能慢慢成为你们的故事。
+            </p>
+            <p class="quiet-note">即使很久没见，也不会忘记你，更不会因为离线而倒退。</p>
+          </div>
+
+          <figure class="screenshot-figure screenshot-figure--journal">
+            <a
+              class="screenshot-frame screenshot-link"
+              href="./assets/screenshots/memory-journal.png"
+              aria-label="查看关系纪念册原图"
+            >
+              <img
+                src="./assets/screenshots/memory-journal.png"
+                width="620"
+                height="470"
+                alt="PetX Desktop 关系纪念册，左侧是 Frieren，右侧记录共同回忆"
+                loading="lazy"
+                decoding="async"
+              />
+            </a>
+            <figcaption><strong>我们的小日记</strong> · 把共同度过的日子留在关系里。</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="section section--library" aria-labelledby="library-title">
+        <div class="shell library-grid">
+          <div class="story-copy">
+            <h2 id="library-title">发现新伙伴</h2>
+            <span class="title-rule" aria-hidden="true"></span>
+            <p>
+              从“我的伙伴”回到使用历史，也能在 Petdex 与 PetShare 继续发现；远端下架或离线，不会带走已经保存在本机的伙伴。
+            </p>
+            <p class="quiet-note">下载兼容包后可以从 pet.json 导入；收藏与导入都不会自动换走当前伙伴。</p>
+          </div>
+
+          <figure class="screenshot-figure screenshot-figure--library">
+            <a
+              class="screenshot-frame screenshot-link"
+              href="./assets/screenshots/pet-library.png"
+              aria-label="查看宠物库原图"
+            >
+              <img
+                src="./assets/screenshots/pet-library.png"
+                width="1080"
+                height="720"
+                alt="PetX Desktop 宠物库，左侧包含我的伙伴与来源，中间浏览 PetShare 伙伴，右侧查看 Frieren 详情"
+                loading="lazy"
+                decoding="async"
+              />
+            </a>
+            <figcaption><strong>我的伙伴与发现</strong> · 本地历史、导入与可信目录在同一个地方。</figcaption>
+          </figure>
+        </div>
+        <p class="shell render-note">界面由当前代码实渲染；不是概念稿或生成图。</p>
+      </section>
+
+      <section id="privacy" class="privacy-section" aria-labelledby="privacy-title">
+        <div class="shell privacy-card">
+          <div class="privacy-intro">
+            <div>
+              <h2 id="privacy-title">只读取<br />必要的状态</h2>
+              <span class="title-rule" aria-hidden="true"></span>
+            </div>
+            <p>
+              它住在桌面，不住在云端。偏好、昵称、照料状态、关系阶段与共同记忆留在本机。桌面感知<span class="nowrap">默认关闭</span>；开启后只读取有限系统状态，前台感知也只看应用名称。
+            </p>
+          </div>
+
+          <div class="privacy-details">
+            <dl class="privacy-list">
+              <div>
+                <dt>本地记忆</dt>
+                <dd>关系数据只保存在你的设备上。</dd>
+              </div>
+              <div>
+                <dt>安静陪伴</dt>
+                <dd>安静时段和临时安静由你决定。</dd>
+              </div>
+              <div>
+                <dt>克制感知</dt>
+                <dd>不读取窗口标题、文档或输入内容。</dd>
+              </div>
+              <div>
+                <dt>伙伴隔离</dt>
+                <dd>每位伙伴各自保存关系与记忆。</dd>
+              </div>
+            </dl>
+
+            <div class="platform-status" aria-label="平台支持状态">
+              <p><strong>macOS</strong><span>可选系统感知与 PetX 通知</span></p>
+              <p><strong>Windows / Linux</strong><span>桌面伙伴、托盘与安装包</span></p>
+            </div>
+          </div>
+
+          <p class="security-note">
+            远端伙伴只接受受信 HTTPS 来源的静态清单与 PNG/WebP 图集，并校验类型、尺寸、身份与 SHA-256；目录可下载不等于获得角色版权。
+          </p>
+        </div>
+      </section>
+
+      <section id="run" class="section run-section" aria-labelledby="run-title">
+        <div class="shell run-grid">
+          <div class="story-copy">
+            <h2 id="run-title">把它带回桌面</h2>
+            <span class="title-rule" aria-hidden="true"></span>
+            <p>当前还没有公开安装包；先从源码把它叫醒。完整依赖与平台说明都写在 README 里。</p>
+          </div>
+
+          <div class="quick-start">
+            <p class="quick-start-title">快速开始</p>
+            <pre aria-label="启动 PetX Desktop 的命令"><code>npm ci
+npm run desktop:dev</code></pre>
+            <a class="button button--primary" href="https://github.com/IchenDEV/petx-desktop#快速开始">
+              查看完整说明
+              <svg class="external-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path d="M5 11 11 5M6 5h5v5" />
+              </svg>
+            </a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-inner">
+        <p>PetX Desktop · Built with PetX React and Tauri&nbsp;2</p>
+        <a href="https://github.com/IchenDEV/petx-desktop">
+          GitHub
+          <svg class="external-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path d="M5 11 11 5M6 5h5v5" />
+          </svg>
+        </a>
+      </div>
+    </footer>
+  </body>
+</html>

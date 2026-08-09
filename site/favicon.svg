@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>PetX Desktop</title>
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="#f4efe3"/>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="none" stroke="#c9bea8" stroke-width="2"/>
+  <path
+    d="m18 25-4-12 14 8a22 22 0 0 1 8 0l14-8-4 12a19 19 0 0 1 5 13c0 11-8 18-19 18s-19-7-19-18a19 19 0 0 1 5-13Z"
+    fill="#d7b66f"
+    stroke="#363531"
+    stroke-linejoin="round"
+    stroke-width="2.5"
+  />
+  <path d="m18 20-1.5-4.5 6 3.5Z" fill="#52716c"/>
+  <path d="m46 20 1.5-4.5-6 3.5Z" fill="#52716c"/>
+  <rect x="21" y="31" width="7" height="7" rx="1" fill="#363531"/>
+  <rect x="36" y="31" width="7" height="7" rx="1" fill="#363531"/>
+  <path d="m28.5 41 3.5 3 3.5-3" fill="none" stroke="#355853" stroke-linecap="round" stroke-linejoin="round" stroke-width="3"/>
+</svg>
